@@ -143,24 +143,34 @@ def test_node_execution_result_validation():
     valid_result = NodeExecutionResult(
         success=True,
         output="Test output",
-        metadata={"model": "gpt-4", "usage": {"total_tokens": 100}},
+        metadata={
+            "node_id": "test_node",
+            "node_type": "ai",
+            "description": "Test execution",
+            "usage": {"total_tokens": 100}
+        },
         duration=1.5
     )
     assert valid_result.success
     assert valid_result.output == "Test output"
-    assert valid_result.metadata["model"] == "gpt-4"
+    assert valid_result.metadata.node_id == "test_node"
+    assert valid_result.metadata.node_type == "ai"
     assert valid_result.duration == 1.5
     
     # Test error result
     error_result = NodeExecutionResult(
         success=False,
         error="Test error",
-        metadata={"error_type": "ValueError"},
+        metadata={
+            "node_id": "test_node",
+            "node_type": "ai",
+            "error_type": "ValueError"
+        },
         duration=0.5
     )
     assert not error_result.success
     assert error_result.error == "Test error"
-    assert error_result.metadata["error_type"] == "ValueError"
+    assert error_result.metadata.error_type == "ValueError"
     assert error_result.duration == 0.5
     
     # Test invalid duration
@@ -168,6 +178,9 @@ def test_node_execution_result_validation():
         NodeExecutionResult(
             success=True,
             output="Test output",
-            metadata={},
+            metadata={
+                "node_id": "test_node",
+                "node_type": "ai"
+            },
             duration=-1.0  # Should be non-negative
         ) 

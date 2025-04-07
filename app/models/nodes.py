@@ -81,7 +81,7 @@ class NodeExecutionResult(BaseModel):
     output: Optional[str] = None
     error: Optional[str] = None
     metadata: NodeMetadata
-    duration: float = 0.0
+    duration: float = Field(default=0.0, ge=0.0, description="Execution duration in seconds")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     def __init__(self, **data):

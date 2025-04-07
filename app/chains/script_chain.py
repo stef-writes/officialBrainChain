@@ -22,16 +22,16 @@ class ScriptChain:
         retry: Retry configuration for API calls
     """
     
-    def __init__(self, retry_config: Dict[str, Any]):
+    def __init__(self, retry_config: Optional[Dict[str, Any]] = None):
         """Initialize the script chain.
         
         Args:
-            retry_config: Configuration for retry behavior
+            retry_config: Configuration for retry behavior. Defaults to None.
         """
         self.graph = nx.DiGraph()
         self.context = ContextManager()
         self.nodes: Dict[str, BaseNode] = {}
-        self.retry = AsyncRetry(**retry_config) if retry_config else None
+        self.retry = AsyncRetry(**(retry_config or {})) if retry_config else None
         
     def add_node(self, node: BaseNode) -> None:
         """Add a node to the chain.
@@ -88,8 +88,8 @@ class ScriptChain:
             for node_id in execution_order:
                 node = self.nodes[node_id]
                 
-                # Get inputs from dependencies
-                context = {}
+                # Get inputs from dependencies and node's context
+                context = self.context.get_context(node_id) or {}
                 for pred in self.graph.predecessors(node_id):
                     if pred in results and results[pred].success:
                         context.update(results[pred].output)
