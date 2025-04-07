@@ -91,9 +91,13 @@ class LLMConfig(BaseModel):
         if v.startswith('sk-test-'):
             return v
             
+        # Allow project-specific API keys that start with 'sk-proj-'
+        if v.startswith('sk-proj-'):
+            return v
+            
         # Validate production API keys
         if not v.startswith('sk-') or len(v) != 51:
-            raise ValueError("API keys must start with 'sk-' and be 51 characters long. Check your OpenAI credentials.")
+            raise ValueError("API keys must start with 'sk-' and be 51 characters long, or start with 'sk-proj-' for project-specific keys. Check your OpenAI credentials.")
         return v
 
 class AppConfig(BaseModel):
