@@ -17,6 +17,7 @@ Gaffer is a framework for creating and executing complex workflows involving Lar
 - **Robust Error Handling**: Comprehensive error handling with detailed error types and messages
 - **Retry Mechanism**: Handle API call failures and rate limits gracefully
 - **Extensible Node System**: Create custom nodes for different types of operations
+- **Event Callbacks**: Track and monitor workflow execution with customizable callbacks
 - **Comprehensive Testing**: Robust test suite with high coverage
 
 ## Installation
@@ -77,6 +78,28 @@ result = await chain.execute()
 print(result.output)
 ```
 
+### Using Callbacks
+
+```python
+from app.utils.callbacks import ScriptChainCallback
+from app.utils.debug_callback import DebugCallback
+
+# Create a custom callback
+class CustomCallback(ScriptChainCallback):
+    async def on_chain_start(self, chain_id: str, config: dict):
+        print(f"Chain {chain_id} started with {config['node_count']} nodes")
+
+    async def on_node_complete(self, node_id: str, result: NodeExecutionResult):
+        print(f"Node {node_id} completed with output: {result.output}")
+
+# Create chain with callbacks
+chain = ScriptChain(callbacks=[CustomCallback(), DebugCallback()])
+
+# Add nodes and execute as normal
+# The callbacks will be triggered at each stage of execution
+result = await chain.execute()
+```
+
 ### Parallel Workflow Execution
 
 ```python
@@ -110,6 +133,8 @@ for node_id, result in results.items():
     - `context.py`: Smart context management
     - `retry.py`: Retry mechanism for API calls
     - `logging.py`: Enhanced logging utilities
+    - `callbacks.py`: Callback system for workflow monitoring
+    - `debug_callback.py`: Debug implementation of callbacks
 - `tests/`: Test suite with real API integration tests
 
 ## Testing
@@ -135,6 +160,15 @@ The context manager includes several optimizations:
 - Importance-based prioritization of context
 - Automatic truncation to stay within token limits
 - Parent context inheritance with optimization
+
+### Event Callbacks
+
+The callback system provides comprehensive monitoring of workflow execution:
+- Chain lifecycle events (start/end)
+- Node execution events (start/complete/error)
+- Context updates
+- Customizable callback implementations
+- Built-in debug callback for logging
 
 ### Error Handling
 
