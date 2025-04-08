@@ -9,8 +9,13 @@ Gaffer is a framework for creating and executing complex workflows involving Lar
 ## Features
 
 - **Directed Graph Workflows**: Create complex workflows with dependencies between nodes
-- **Context Management**: Maintain state across nodes with token-aware optimization
-- **Retry Mechanism**: Handle API call failures gracefully
+- **Smart Context Management**: 
+  - Token-aware optimization with dynamic summarization
+  - Intelligent context prioritization based on importance
+  - Automatic context truncation to stay within token limits
+- **Parallel Workflow Execution**: Execute multiple nodes concurrently with proper dependency handling
+- **Robust Error Handling**: Comprehensive error handling with detailed error types and messages
+- **Retry Mechanism**: Handle API call failures and rate limits gracefully
 - **Extensible Node System**: Create custom nodes for different types of operations
 - **Comprehensive Testing**: Robust test suite with high coverage
 
@@ -72,6 +77,28 @@ result = await chain.execute()
 print(result.output)
 ```
 
+### Parallel Workflow Execution
+
+```python
+# Create multiple nodes
+nodes = [TextGenerationNode.create(llm_config) for _ in range(3)]
+node_ids = [node.node_id for node in nodes]
+
+# Set context for each node
+for i, node_id in enumerate(node_ids):
+    chain.context.set_context(node_id, {
+        "prompt": f"What is {i}+2? Answer in one word."
+    })
+
+# Execute workflow in parallel
+results = await chain.execute_workflow(nodes, node_ids)
+
+# Process results
+for node_id, result in results.items():
+    if result.success:
+        print(f"Node {node_id}: {result.output}")
+```
+
 ## Project Structure
 
 - `app/`: Main application code
@@ -80,7 +107,10 @@ print(result.output)
   - `models/`: Data models
   - `nodes/`: Node implementations
   - `utils/`: Utility functions
-- `tests/`: Test suite
+    - `context.py`: Smart context management
+    - `retry.py`: Retry mechanism for API calls
+    - `logging.py`: Enhanced logging utilities
+- `tests/`: Test suite with real API integration tests
 
 ## Testing
 
@@ -90,7 +120,30 @@ python -m pytest
 
 # Run tests with coverage
 python -m pytest --cov=app
+
+# Run specific test file
+python -m pytest tests/test_script_chain.py
 ```
+
+## Features in Detail
+
+### Smart Context Management
+
+The context manager includes several optimizations:
+- Token counting for different data types
+- Dynamic context summarization for long texts
+- Importance-based prioritization of context
+- Automatic truncation to stay within token limits
+- Parent context inheritance with optimization
+
+### Error Handling
+
+Comprehensive error handling includes:
+- Authentication errors
+- Rate limit handling
+- API errors
+- Network issues
+- Invalid input validation
 
 ## License
 

@@ -24,16 +24,20 @@ class ScriptChain:
         retry: Retry configuration for API calls
     """
     
-    def __init__(self, retry_config: Optional[Dict[str, Any]] = None):
+    def __init__(self, max_context_tokens: int = 4000):
         """Initialize the script chain.
         
         Args:
-            retry_config: Configuration for retry behavior. Defaults to None.
+            max_context_tokens: Maximum number of tokens allowed in the context
         """
         self.graph = nx.DiGraph()
-        self.context = ContextManager()
+        self.context = ContextManager(max_context_tokens)
+        self.logger = logging.getLogger(__name__)
         self.nodes: Dict[str, BaseNode] = {}
-        self.retry = AsyncRetry(**(retry_config or {})) if retry_config else None
+        self.retry = None
+        
+        # Override the _get_parent_nodes method in the context manager
+        self.context._get_parent_nodes = self._get_parent_nodes
         
     def add_node(self, node: BaseNode) -> None:
         """Add a node to the chain.
@@ -88,7 +92,7 @@ class ScriptChain:
                 node = self.nodes[node_id]
                 
                 # Get inputs from dependencies and node's context
-                context = self.context.get_context(node_id) or {}
+                context = self.context.get_context_with_optimization(node_id)
                 for pred in self.graph.predecessors(node_id):
                     if pred in results and results[pred].success:
                         pred_output = results[pred].output
@@ -105,7 +109,7 @@ class ScriptChain:
                 
                 # Update context with node's output
                 if result.success and result.output:
-                    self._update_context(node_id, result)
+                    self.context.set_context(node_id, {"output": result.output})
                 
                 # Aggregate usage metadata
                 if result.usage:
@@ -181,3 +185,68 @@ class ScriptChain:
                 "retry_count": self.retry.current_retry if self.retry else 0
             }
         )
+
+    def _get_parent_nodes(self, node_id: str) -> List[str]:
+        """Get parent nodes for a given node ID based on the graph structure.
+        
+        Args:
+            node_id: The ID of the node to get parents for
+            
+        Returns:
+            List of parent node IDs
+        """
+        return list(self.graph.predecessors(node_id))
+
+    async def execute_node(self, node: BaseNode, node_id: str) -> Dict[str, Any]:
+        """Execute a single node with optimized context
+        
+        Args:
+            node: The node to execute
+            node_id: The ID of the node
+            
+        Returns:
+            The node's output
+        """
+        try:
+            # Get optimized context for the node
+            context = self.context.get_context_with_optimization(node_id)
+            
+            # Execute the node with the optimized context
+            result = await node.execute(context)
+            
+            # Store the output in context
+            if result.success and result.output:
+                self.context.set_context(node_id, {"output": result.output})
+            
+            return result
+        except Exception as e:
+            self.logger.error(f"Error executing node {node_id}: {str(e)}")
+            raise
+    
+    async def execute_workflow(self, nodes: List[BaseNode], node_ids: List[str]) -> Dict[str, NodeExecutionResult]:
+        """Execute a workflow of nodes with optimized context management
+        
+        Args:
+            nodes: List of nodes to execute
+            node_ids: List of node IDs corresponding to the nodes
+            
+        Returns:
+            Dictionary mapping node IDs to their execution results
+        """
+        # Build the graph
+        for i, node_id in enumerate(node_ids):
+            self.graph.add_node(node_id)
+            if i > 0:
+                self.graph.add_edge(node_ids[i-1], node_id)
+        
+        # Execute nodes in topological order
+        results = {}
+        for node_id in nx.topological_sort(self.graph):
+            node_index = node_ids.index(node_id)
+            node = nodes[node_index]
+            
+            # Execute the node with optimized context
+            result = await self.execute_node(node, node_id)
+            results[node_id] = result
+        
+        return results
