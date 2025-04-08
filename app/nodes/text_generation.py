@@ -26,6 +26,61 @@ from app.utils.logging import logger
 
 logger = logging.getLogger(__name__)
 
+class OpenAIErrorHandler:
+    """Centralized error handling for OpenAI API calls"""
+    
+    @classmethod
+    def classify_error(cls, error: Exception) -> str:
+        """Classify OpenAI API errors into standardized error types.
+        
+        Args:
+            error: The exception to classify
+            
+        Returns:
+            Standardized error type string
+        """
+        # Check for specific error types
+        error_map = {
+            APIError: "APIError",
+            RateLimitError: "RateLimitError",
+            Timeout: "TimeoutError"
+        }
+        
+        # Check for specific error messages
+        error_message = str(error).lower()
+        if "api key" in error_message or "authentication" in error_message:
+            return "AuthenticationError"
+        elif "rate limit" in error_message:
+            return "RateLimitError"
+        elif "timeout" in error_message:
+            return "TimeoutError"
+        
+        # Return mapped error type or default
+        return error_map.get(type(error), "UnknownError")
+    
+    @classmethod
+    def format_error_message(cls, error: Exception) -> str:
+        """Create user-friendly error messages.
+        
+        Args:
+            error: The exception to format
+            
+        Returns:
+            User-friendly error message
+        """
+        error_type = cls.classify_error(error)
+        
+        if error_type == "APIError":
+            return "API service unavailable. Please try again later."
+        elif error_type == "RateLimitError":
+            return "Rate limit exceeded. Please adjust your request rate."
+        elif error_type == "TimeoutError":
+            return f"Request timed out. Please try again."
+        elif error_type == "AuthenticationError":
+            return "Authentication failed. Please check your API key."
+        
+        return str(error)
+
 class TextGenerationNode(BaseNode):
     """Node for text generation using OpenAI's API"""
     
@@ -41,10 +96,10 @@ class TextGenerationNode(BaseNode):
         self._client = None
     
     @property
-    def client(self) -> OpenAI:
+    def client(self) -> AsyncOpenAI:
         """Get the OpenAI client instance."""
         if self._client is None:
-            self._client = OpenAI(api_key=self.llm_config.api_key)
+            self._client = AsyncOpenAI(api_key=self.llm_config.api_key)
         return self._client
     
     @classmethod
@@ -92,7 +147,7 @@ class TextGenerationNode(BaseNode):
             
             # Call OpenAI API
             try:
-                response = self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(
                     model=self.llm_config.model,
                     messages=messages,
                     temperature=self.llm_config.temperature,
@@ -127,16 +182,9 @@ class TextGenerationNode(BaseNode):
                 )
                 
             except Exception as e:
-                # Handle API errors
-                error_type = "APIError"
-                error_message = str(e)
-                
-                if "API key" in error_message:
-                    error_type = "AuthenticationError"
-                elif "rate limit" in error_message.lower():
-                    error_type = "RateLimitError"
-                elif "timeout" in error_message.lower():
-                    error_type = "TimeoutError"
+                # Use centralized error handling
+                error_type = OpenAIErrorHandler.classify_error(e)
+                error_message = OpenAIErrorHandler.format_error_message(e)
                 
                 return NodeExecutionResult(
                     success=False,
@@ -227,13 +275,7 @@ class TextGenerationNode(BaseNode):
 
     def _format_error(self, error: Exception) -> str:
         """Create user-friendly error messages"""
-        if isinstance(error, APIError):
-            return "API service unavailable. Please try again later."
-        if isinstance(error, RateLimitError):
-            return "Rate limit exceeded. Please adjust your request rate."
-        if isinstance(error, Timeout):
-            return f"Request timed out after {self.config.timeout}s"
-        return str(error)
+        return OpenAIErrorHandler.format_error_message(error)
 
     def _update_execution_stats(self, result: NodeExecutionResult):
         """Update node execution statistics"""

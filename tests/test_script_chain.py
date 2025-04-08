@@ -160,8 +160,8 @@ async def test_error_handling(script_chain, llm_config):
     assert not result.success
     assert result.error is not None
     assert result.metadata.error_type == "AuthenticationError"
-    assert "incorrect api key provided" in result.error.lower()
-    assert "invalid_api_key" in result.error.lower()
+    assert "authentication failed" in result.error.lower()
+    assert "api key" in result.error.lower()
 
 @pytest.mark.asyncio
 async def test_retry_mechanism(script_chain, llm_config):
