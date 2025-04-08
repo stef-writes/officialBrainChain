@@ -74,14 +74,19 @@ class ScriptChain:
             self.nodes[to_node_id].config.dependencies.append(from_node_id)
     
     async def execute(self) -> NodeExecutionResult:
-        """Execute the chain of nodes in dependency order.
+        """Execute the workflow chain.
         
         Returns:
-            The combined execution result
+            NodeExecutionResult with aggregated results
         """
-        start_time = datetime.utcnow()
-        results: Dict[str, NodeExecutionResult] = {}
-        total_usage = UsageMetadata()
+        # Initialize results and usage tracking
+        results = {}
+        total_usage = UsageMetadata(
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            api_calls=0
+        )
         
         try:
             # Get execution order from graph
@@ -111,51 +116,62 @@ class ScriptChain:
                 if result.success and result.output:
                     self.context.set_context(node_id, {"output": result.output})
                 
-                # Aggregate usage metadata
-                if result.usage:
-                    total_usage.prompt_tokens = (total_usage.prompt_tokens or 0) + (result.usage.prompt_tokens or 0)
-                    total_usage.completion_tokens = (total_usage.completion_tokens or 0) + (result.usage.completion_tokens or 0)
-                    total_usage.total_tokens = (total_usage.total_tokens or 0) + (result.usage.total_tokens or 0)
-                    total_usage.api_calls = (total_usage.api_calls or 0) + (result.usage.api_calls or 0)
-                
                 # Stop execution if node failed
                 if not result.success:
                     break
             
             # Create combined result
             success = all(r.success for r in results.values())
-            failed_result = next((r for r in results.values() if not r.success), None) if not success else None
             
+            # Get the final node's output
+            final_node_id = execution_order[-1]
+            final_result = results[final_node_id]
+            
+            # Get usage stats from context manager
+            usage_stats = self.context.get_usage_stats()
+            
+            # Aggregate usage from all nodes
+            for node_id, usage in usage_stats.items():
+                if usage:
+                    total_usage.prompt_tokens = (total_usage.prompt_tokens or 0) + (usage.prompt_tokens or 0)
+                    total_usage.completion_tokens = (total_usage.completion_tokens or 0) + (usage.completion_tokens or 0)
+                    total_usage.total_tokens = (total_usage.total_tokens or 0) + (usage.total_tokens or 0)
+                    total_usage.api_calls = (total_usage.api_calls or 0) + (usage.api_calls or 0)
+            
+            # Create the final result
             return NodeExecutionResult(
                 success=success,
-                output=str(results) if results else None,
-                error=None if success else failed_result.error,
+                output=final_result.output if success else None,
+                error=final_result.error if not success else None,
                 metadata=NodeMetadata(
-                    node_id="script_chain",
+                    node_id="chain",
                     node_type="chain",
                     version="1.0.0",
-                    description="Script chain execution result",
-                    error_type=None if success else failed_result.metadata.error_type
+                    description="Workflow chain execution",
+                    error_type=final_result.metadata.error_type if not success else None,
+                    timestamp=datetime.utcnow()
                 ),
-                duration=(datetime.utcnow() - start_time).total_seconds(),
+                duration=sum(r.duration for r in results.values()),
                 timestamp=datetime.utcnow(),
-                usage=total_usage if total_usage.total_tokens > 0 else None
+                usage=total_usage
             )
             
         except Exception as e:
-            logger.error(f"Error executing script chain: {str(e)}")
+            # Handle unexpected errors
+            logger.error(f"Chain execution failed: {str(e)}", exc_info=True)
             return NodeExecutionResult(
                 success=False,
                 output=None,
-                error=str(e),
+                error=f"Chain execution failed: {str(e)}",
                 metadata=NodeMetadata(
-                    node_id="script_chain",
+                    node_id="chain",
                     node_type="chain",
                     version="1.0.0",
-                    description="Script chain execution result",
-                    error_type=e.__class__.__name__
+                    description="Workflow chain execution",
+                    error_type="ChainError",
+                    timestamp=datetime.utcnow()
                 ),
-                duration=(datetime.utcnow() - start_time).total_seconds(),
+                duration=sum(r.duration for r in results.values()) if results else 0,
                 timestamp=datetime.utcnow()
             )
     

@@ -4,8 +4,30 @@ Prompt template system with version tracking
 
 import re
 from typing import Optional
+from packaging import version
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from app.utils.logging import logger
+
+def parse_model_version(model_name: str) -> str:
+    """Convert model name to semantic version string.
+    
+    Args:
+        model_name: Name of the model (e.g., 'gpt-4', 'gpt-4-turbo')
+        
+    Returns:
+        Semantic version string (e.g., '4.0.0', '4.1.0')
+        
+    Raises:
+        ValueError: If model name is not supported
+    """
+    if model_name == "gpt-4":
+        return "4.0.0"
+    elif model_name == "gpt-4-turbo":
+        return "4.1.0"
+    elif model_name == "gpt-4-32k":
+        return "4.0.1"
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
 
 class MessageTemplate(BaseModel):
     """Template for message generation"""
@@ -55,6 +77,28 @@ class MessageTemplate(BaseModel):
         if v not in valid_models:
             raise ValueError(f"Unsupported model version. Valid options: {', '.join(valid_models)}")
         return v
+
+    def is_compatible_with_model(self, model_name: str) -> bool:
+        """Check if template is compatible with given model version.
+        
+        Args:
+            model_name: Name of the model to check compatibility with
+            
+        Returns:
+            True if model meets minimum version requirement, False otherwise
+        """
+        try:
+            model_ver = version.parse(parse_model_version(model_name))
+            min_ver = version.parse(parse_model_version(self.min_model_version))
+            return model_ver >= min_ver
+        except ValueError:
+            return False
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Validate model version compatibility during initialization
+        if not self.is_compatible_with_model(data.get('min_model_version', 'gpt-4')):
+            raise ValueError(f"Model {data.get('min_model_version')} is too old for this template")
 
 class LLMConfig(BaseModel):
     """Configuration for language model parameters"""

@@ -23,6 +23,7 @@ from app.utils.context import ContextManager
 from app.utils.retry import AsyncRetry
 from app.nodes.base import BaseNode
 from app.utils.logging import logger
+from app.utils.tracking import track_usage
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ class OpenAIErrorHandler:
 class TextGenerationNode(BaseNode):
     """Node for text generation using OpenAI's API"""
     
+    # Shared client pool for all instances
+    _client_pool = {}
+    
     def __init__(self, config: NodeConfig):
         """Initialize the text generation node.
         
@@ -93,14 +97,19 @@ class TextGenerationNode(BaseNode):
         super().__init__(config)
         self.llm_config = config.llm_config
         self.templates = config.templates
-        self._client = None
     
     @property
     def client(self) -> AsyncOpenAI:
-        """Get the OpenAI client instance."""
-        if self._client is None:
-            self._client = AsyncOpenAI(api_key=self.llm_config.api_key)
-        return self._client
+        """Get the OpenAI client instance from the shared pool.
+        
+        Returns:
+            AsyncOpenAI client instance
+        """
+        if self.llm_config.api_key not in self._client_pool:
+            self._client_pool[self.llm_config.api_key] = AsyncOpenAI(
+                api_key=self.llm_config.api_key
+            )
+        return self._client_pool[self.llm_config.api_key]
     
     @classmethod
     def create(cls, llm_config: LLMConfig) -> 'TextGenerationNode':
@@ -117,33 +126,22 @@ class TextGenerationNode(BaseNode):
         )
         return cls(config)
     
+    @track_usage
     async def execute(self, context: Dict[str, Any]) -> NodeExecutionResult:
         """Execute text generation with the given context."""
         start_time = datetime.utcnow()
         
         try:
+            # Run pre-execute hook
+            context = await self.pre_execute(context)
+            
             # Validate prompt
             prompt = context.get("prompt")
             if not prompt:
                 raise ValueError("No prompt provided in context")
             
             # Create messages
-            messages = []
-            
-            # Add system message if templates exist
-            if self.templates:
-                for template in self.templates:
-                    if template.role == "system":
-                        messages.append({
-                            "role": "system",
-                            "content": template.content.format(**context)
-                        })
-            
-            # Add user message
-            messages.append({
-                "role": "user",
-                "content": prompt
-            })
+            messages = self._build_messages(context, context)
             
             # Call OpenAI API
             try:
@@ -158,7 +156,7 @@ class TextGenerationNode(BaseNode):
                 output = response.choices[0].message.content
                 
                 # Create successful result
-                return NodeExecutionResult(
+                result = NodeExecutionResult(
                     success=True,
                     output=output,
                     error=None,
@@ -177,16 +175,20 @@ class TextGenerationNode(BaseNode):
                         completion_tokens=response.usage.completion_tokens,
                         total_tokens=response.usage.total_tokens,
                         api_calls=1,
-                        model=self.llm_config.model
+                        model=self.llm_config.model,
+                        node_id=self.node_id  # Add node_id to usage metadata
                     )
                 )
+                
+                # Run post-execute hook
+                return await self.post_execute(result)
                 
             except Exception as e:
                 # Use centralized error handling
                 error_type = OpenAIErrorHandler.classify_error(e)
                 error_message = OpenAIErrorHandler.format_error_message(e)
                 
-                return NodeExecutionResult(
+                result = NodeExecutionResult(
                     success=False,
                     output=None,
                     error=error_message,
@@ -202,9 +204,12 @@ class TextGenerationNode(BaseNode):
                     timestamp=datetime.utcnow()
                 )
                 
+                # Run post-execute hook even for errors
+                return await self.post_execute(result)
+                
         except ValueError as e:
             # Handle validation errors
-            return NodeExecutionResult(
+            result = NodeExecutionResult(
                 success=False,
                 output=None,
                 error=str(e),
@@ -219,6 +224,9 @@ class TextGenerationNode(BaseNode):
                 duration=(datetime.utcnow() - start_time).total_seconds(),
                 timestamp=datetime.utcnow()
             )
+            
+            # Run post-execute hook for validation errors
+            return await self.post_execute(result)
 
     @property
     def input_keys(self) -> List[str]:
@@ -230,31 +238,57 @@ class TextGenerationNode(BaseNode):
         """Get list of output keys from schema"""
         return list(self.config.output_schema.keys())
 
-    def _init_template(self, role: str) -> MessageTemplate:
-        """Validate and initialize versioned templates"""
-        template = next(
-            t for t in self.config.templates 
-            if t.role == role and t.version == self.config.metadata.version
-        )
-        if template.min_model_version > self.config.llm_config.model:
-            raise ValueError(
-                f"Template {template.version} requires model version "
-                f"{template.min_model_version}, but using {self.config.llm_config.model}"
-            )
-        return template
+    def get_template(self, role: str) -> MessageTemplate:
+        """Get a template by role.
+        
+        Args:
+            role: The role of the template to retrieve
+            
+        Returns:
+            The matching MessageTemplate
+            
+        Raises:
+            ValueError: If no template is found for the given role
+        """
+        try:
+            return next(t for t in self.templates if t.role == role)
+        except StopIteration:
+            raise ValueError(f"No template found for role: {role}")
 
     def _build_messages(self, inputs: Dict, context: Dict) -> List[Dict]:
-        """Construct messages with versioned templates"""
-        return [
-            self._init_template('system').format(
-                context=context.get("background", ""),
-                instructions=inputs.get("instructions", "")
-            ),
-            self._init_template('user').format(
-                query=inputs.get("query", ""),
-                **inputs.get("additional_args", {})
-            )
-        ]
+        """Construct messages with templates"""
+        messages = []
+        
+        # Add system message if template exists
+        try:
+            system_template = self.get_template('system')
+            # Combine inputs and context for template formatting
+            format_args = {**inputs, **context}
+            messages.append({
+                "role": "system",
+                "content": system_template.content.format(**format_args)
+            })
+        except ValueError:
+            # No system template, continue without it
+            pass
+            
+        # Add user message
+        try:
+            user_template = self.get_template('user')
+            # Combine inputs and context for template formatting
+            format_args = {**inputs, **context}
+            messages.append({
+                "role": "user",
+                "content": user_template.content.format(**format_args)
+            })
+        except ValueError:
+            # Fall back to direct prompt if no user template
+            messages.append({
+                "role": "user",
+                "content": inputs.get("query", inputs.get("prompt", ""))
+            })
+            
+        return messages
 
     def _process_response(self, response: Dict) -> Tuple[str, Dict]:
         """Extract and validate response content"""

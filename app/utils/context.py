@@ -2,9 +2,12 @@
 Simple context management with token awareness and inheritance
 """
 
-from typing import Dict, Any, Union, List, Optional
+from typing import Dict, Any, Union, List, Optional, TYPE_CHECKING
 import tiktoken
 import json
+
+if TYPE_CHECKING:
+    from app.models.node_models import UsageMetadata
 
 class ContextManager:
     """Manages workflow context with token limit awareness"""
@@ -14,6 +17,7 @@ class ContextManager:
         self.max_tokens = max_context_tokens
         self._context: Dict[str, Dict[str, Any]] = {}
         self._token_counts: Dict[str, int] = {}
+        self._usage_stats: Dict[str, 'UsageMetadata'] = {}
 
     def set_context(self, node_id: str, context: Dict[str, Any]) -> None:
         """Set context for a node with token tracking"""
@@ -111,6 +115,39 @@ class ContextManager:
         if node_id is None:
             self._context.clear()
             self._token_counts.clear()
+            self._usage_stats.clear()
         else:
             self._context.pop(node_id, None)
             self._token_counts.pop(node_id, None)
+            self._usage_stats.pop(node_id, None)
+            
+    def track_usage(self, usage: 'UsageMetadata') -> None:
+        """Track token usage for a node.
+        
+        Args:
+            usage: The usage metadata to track
+        """
+        # Store the usage stats
+        node_id = getattr(usage, 'node_id', 'unknown')
+        self._usage_stats[node_id] = usage
+        
+        # Update token counts if needed
+        if node_id in self._token_counts:
+            # Add the total tokens to the existing count
+            self._token_counts[node_id] += usage.total_tokens or 0
+        else:
+            # Create a new entry if it doesn't exist
+            self._token_counts[node_id] = usage.total_tokens or 0
+            
+    def get_usage_stats(self, node_id: Optional[str] = None) -> Dict[str, 'UsageMetadata']:
+        """Get usage statistics for a node or all nodes.
+        
+        Args:
+            node_id: The node ID to get usage stats for, or None for all nodes
+            
+        Returns:
+            A dictionary of node IDs to usage metadata
+        """
+        if node_id is None:
+            return self._usage_stats
+        return {node_id: self._usage_stats.get(node_id)}

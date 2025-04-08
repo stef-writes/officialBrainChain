@@ -51,6 +51,15 @@ class NodeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")  # Prevent unexpected arguments
 
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Check model compatibility for all templates
+        if 'templates' in data and 'llm_config' in data:
+            model = data['llm_config'].model
+            for template in self.templates:
+                if not template.is_compatible_with_model(model):
+                    raise ValueError(f"Model {model} is too old for template requiring {template.min_model_version}")
+
 class NodeExecutionRecord(BaseModel):
     """Execution statistics and historical data"""
     node_id: str
@@ -76,6 +85,7 @@ class UsageMetadata(BaseModel):
     total_tokens: Optional[int] = Field(default=0, description="Total number of tokens used")
     api_calls: Optional[int] = Field(default=0, description="Number of API calls made")
     model: Optional[str] = None
+    node_id: Optional[str] = Field(default=None, description="ID of the node that generated this usage")
     model_config = ConfigDict(extra="allow")
 
 class NodeExecutionResult(BaseModel):
