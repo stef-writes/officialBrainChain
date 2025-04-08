@@ -4,7 +4,7 @@ Main workflow orchestration chain for LLM nodes
 
 from datetime import datetime
 import networkx as nx
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Set
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata, UsageMetadata
 from app.models.config import LLMConfig, MessageTemplate
 from app.nodes.text_generation import TextGenerationNode
@@ -13,6 +13,8 @@ from app.utils.retry import AsyncRetry
 from app.nodes.base import BaseNode
 from app.utils.callbacks import ScriptChainCallback
 import logging
+from uuid import uuid4
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +39,14 @@ class ScriptChain:
             max_context_tokens: Maximum number of tokens allowed in the context
             callbacks: Optional list of callback handlers
         """
+        self.chain_id = f"chain_{uuid4().hex[:8]}"
         self.graph = nx.DiGraph()
         self.context = ContextManager(max_context_tokens)
         self.logger = logging.getLogger(__name__)
         self.nodes: Dict[str, BaseNode] = {}
         self.retry = None
         self.callbacks = callbacks or []
+        logger.info(f"Created new script chain with ID: {self.chain_id}")
         
         # Override the _get_parent_nodes method in the context manager
         self.context._get_parent_nodes = self._get_parent_nodes
@@ -81,162 +85,98 @@ class ScriptChain:
         if from_node_id not in self.nodes[to_node_id].config.dependencies:
             self.nodes[to_node_id].config.dependencies.append(from_node_id)
     
-    async def execute(self) -> NodeExecutionResult:
-        """Execute the workflow chain.
+    async def execute(self) -> Dict[str, Any]:
+        """Execute the entire chain in dependency order."""
+        start_time = datetime.utcnow()
+        execution_order = self._get_execution_order()
         
-        Returns:
-            NodeExecutionResult with aggregated results
-        """
-        # Initialize results and usage tracking
+        # Notify chain start
+        chain_config = {
+            "node_count": len(self.nodes),
+            "execution_order": execution_order,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        for callback in self.callbacks:
+            await callback.on_chain_start(self.chain_id, chain_config)
+        
         results = {}
-        total_usage = UsageMetadata(
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            api_calls=0
-        )
+        total_usage = UsageMetadata()
         
         try:
-            # Get execution order from graph
-            execution_order = list(nx.topological_sort(self.graph))
-            
-            # Notify chain start
-            chain_id = f"chain_{datetime.utcnow().timestamp()}"
-            chain_config = {
-                "node_count": len(self.nodes),
-                "execution_order": execution_order
-            }
-            for callback in self.callbacks:
-                await callback.on_chain_start(chain_id, chain_config)
-            
-            # Execute nodes in order
             for node_id in execution_order:
                 node = self.nodes[node_id]
+                node_start = datetime.utcnow()
                 
                 # Notify node start
                 for callback in self.callbacks:
                     await callback.on_node_start(node_id, node.config)
                 
-                # Get inputs from dependencies and node's context
-                context = self.context.get_context_with_optimization(node_id)
-                for pred in self.graph.predecessors(node_id):
-                    if pred in results and results[pred].success:
-                        pred_output = results[pred].output
-                        if pred_output is not None:
-                            context.update({"output": pred_output})
-                
-                # Execute node
-                if self.retry:
-                    result = await self.retry.execute(node.execute, context)
-                else:
-                    result = await node.execute(context)
-                
-                results[node_id] = result
-                
-                # Update context with node's output
-                if result.success and result.output:
-                    self.context.set_context(node_id, {"output": result.output})
-                    # Notify context update
-                    for callback in self.callbacks:
-                        await callback.on_context_update(
-                            node_id,
-                            {"output": result.output},
-                            {"timestamp": datetime.utcnow().isoformat()}
+                try:
+                    result = await node.execute(self.context)
+                    results[node_id] = result
+                    
+                    # Update total usage
+                    if result.usage:
+                        total_usage = UsageMetadata(
+                            prompt_tokens=total_usage.prompt_tokens + result.usage.prompt_tokens,
+                            completion_tokens=total_usage.completion_tokens + result.usage.completion_tokens,
+                            total_tokens=total_usage.total_tokens + result.usage.total_tokens
                         )
-                
-                # Notify node completion
-                for callback in self.callbacks:
-                    await callback.on_node_complete(
-                        node_id,
-                        result,
-                        result.usage
+                    
+                    # Notify node completion
+                    for callback in self.callbacks:
+                        await callback.on_node_complete(node_id, result)
+                    
+                except Exception as e:
+                    logger.error(f"Error executing node {node_id}: {str(e)}")
+                    results[node_id] = NodeExecutionResult(
+                        success=False,
+                        error=str(e)
                     )
-                
-                # Stop execution if node failed
-                if not result.success:
                     # Notify node error
                     for callback in self.callbacks:
-                        await callback.on_node_error(
-                            node_id,
-                            Exception(result.error) if result.error else Exception("Unknown error"),
-                            context
-                        )
-                    break
+                        await callback.on_node_error(node_id, str(e))
             
-            # Create combined result
             success = all(r.success for r in results.values())
-            
-            # Get the final node's output
-            final_node_id = execution_order[-1]
-            final_result = results[final_node_id]
-            
-            # Get usage stats from context manager
-            usage_stats = self.context.get_usage_stats()
-            
-            # Aggregate usage from all nodes
-            for node_id, usage in usage_stats.items():
-                if usage:
-                    total_usage.prompt_tokens = (total_usage.prompt_tokens or 0) + (usage.prompt_tokens or 0)
-                    total_usage.completion_tokens = (total_usage.completion_tokens or 0) + (usage.completion_tokens or 0)
-                    total_usage.total_tokens = (total_usage.total_tokens or 0) + (usage.total_tokens or 0)
-                    total_usage.api_calls = (total_usage.api_calls or 0) + (usage.api_calls or 0)
-            
-            # Create the final result
-            result = NodeExecutionResult(
-                success=success,
-                output=final_result.output if success else None,
-                error=final_result.error if not success else None,
-                metadata=NodeMetadata(
-                    node_id="chain",
-                    node_type="chain",
-                    version="1.0.0",
-                    description="Workflow chain execution",
-                    error_type=final_result.metadata.error_type if not success else None,
-                    timestamp=datetime.utcnow()
-                ),
-                duration=sum(r.duration for r in results.values()),
-                timestamp=datetime.utcnow(),
-                usage=total_usage
-            )
+            total_duration = (datetime.utcnow() - start_time).total_seconds()
             
             # Notify chain end
+            chain_result = {
+                "chain_id": self.chain_id,
+                "success": success,
+                "duration": total_duration,
+                "node_results": {k: v.dict() for k, v in results.items()}
+            }
             for callback in self.callbacks:
-                await callback.on_chain_end(chain_id, {
-                    "success": success,
-                    "output": result.output,
-                    "error": result.error,
-                    "usage": total_usage.dict() if total_usage else None
-                })
+                await callback.on_chain_end(self.chain_id, chain_result)
             
-            return result
+            return {
+                "success": success,
+                "output": results[execution_order[-1]].output if success else None,
+                "usage": total_usage.dict() if total_usage else None,
+                "duration": total_duration
+            }
             
         except Exception as e:
-            # Handle unexpected errors
-            logger.error(f"Chain execution failed: {str(e)}", exc_info=True)
+            logger.error(f"Chain execution failed: {str(e)}")
+            total_duration = (datetime.utcnow() - start_time).total_seconds()
             
             # Notify chain end with error
+            chain_result = {
+                "chain_id": self.chain_id,
+                "success": False,
+                "error": str(e),
+                "duration": total_duration,
+                "node_results": {k: v.dict() for k, v in results.items()}
+            }
             for callback in self.callbacks:
-                await callback.on_chain_end(chain_id, {
-                    "success": False,
-                    "error": str(e),
-                    "error_type": "ChainError"
-                })
+                await callback.on_chain_end(self.chain_id, chain_result)
             
-            return NodeExecutionResult(
-                success=False,
-                output=None,
-                error=f"Chain execution failed: {str(e)}",
-                metadata=NodeMetadata(
-                    node_id="chain",
-                    node_type="chain",
-                    version="1.0.0",
-                    description="Workflow chain execution",
-                    error_type="ChainError",
-                    timestamp=datetime.utcnow()
-                ),
-                duration=sum(r.duration for r in results.values()) if results else 0,
-                timestamp=datetime.utcnow()
-            )
+            return {
+                "success": False,
+                "error": str(e),
+                "duration": total_duration
+            }
     
     def _collect_inputs(self, node_id: str) -> Dict:
         """Gather inputs from connected nodes"""

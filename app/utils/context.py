@@ -5,62 +5,92 @@ Simple context management with token awareness and inheritance
 from typing import Dict, Any, Union, List, Optional, TYPE_CHECKING
 import tiktoken
 import json
+from datetime import datetime
+from uuid import uuid4
+import logging
 
 if TYPE_CHECKING:
     from app.models.node_models import UsageMetadata
 
+logger = logging.getLogger(__name__)
+
 class ContextManager:
     """Manages workflow context with token limit awareness"""
     
-    def __init__(self, max_context_tokens: int = 4000):
+    def __init__(self, max_context_tokens: Optional[int] = None):
+        """Initialize the context manager.
+        
+        Args:
+            max_context_tokens: Optional maximum number of tokens allowed in context
+        """
         self.encoder = tiktoken.get_encoding("cl100k_base")
-        self.max_tokens = max_context_tokens
-        self._context: Dict[str, Dict[str, Any]] = {}
-        self._token_counts: Dict[str, int] = {}
-        self._usage_stats: Dict[str, 'UsageMetadata'] = {}
+        self.max_context_tokens = max_context_tokens
+        self.contexts: Dict[str, Dict[str, Any]] = {}
+        self.usage_stats: Dict[str, Dict[str, int]] = {}
 
-    def set_context(self, node_id: str, context: Dict[str, Any]) -> None:
-        """Set context for a node with token tracking"""
-        if not isinstance(context, dict):
-            raise ValueError("Context must be a dictionary")
+    def set_context(self, node_id: str, data: Dict[str, Any]) -> None:
+        """Set context for a node.
         
-        # Filter out None values
-        context = {k: v for k, v in context.items() if v is not None}
-        
-        # Calculate token counts
-        token_count = 0
-        for value in context.values():
-            if isinstance(value, (str, int, float, bool)):
-                token_count += len(self.encoder.encode(str(value)))
-            elif isinstance(value, (list, dict)):
-                token_count += len(self.encoder.encode(json.dumps(value)))
-            else:
-                token_count += len(self.encoder.encode(str(value)))
-        
-        self._token_counts[node_id] = token_count
-        self._context[node_id] = context
+        Args:
+            node_id: ID of the node
+            data: Context data to set
+        """
+        self.contexts[node_id] = {
+            "data": data,
+            "version": uuid4().hex[:8],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        logger.debug(f"Set context for node {node_id} with version {self.contexts[node_id]['version']}")
 
-    def get_context(self, node_id: str, include_parents: bool = False) -> Dict[str, Any]:
-        """Get context for a node, optionally including parent context"""
-        if node_id not in self._context:
-            raise ValueError(f"No context found for node {node_id}")
-            
-        if not include_parents:
-            return self._optimize_context(self._context[node_id])
-            
-        # Include parent context
-        context = {}
-        for parent_id in self._get_parent_nodes(node_id):
-            if parent_id in self._context:
-                context.update(self._context[parent_id])
-        context.update(self._context[node_id])
+    def get_context(self, node_id: str) -> Dict[str, Any]:
+        """Get context for a node.
         
-        return self._optimize_context(context)
+        Args:
+            node_id: ID of the node
+            
+        Returns:
+            Context data for the node
+        """
+        context = self.contexts.get(node_id, {})
+        return context.get("data", {}) if isinstance(context, dict) else {}
+
+    def get_context_with_version(self, node_id: str) -> Dict[str, Any]:
+        """Get context with version information for a node.
+        
+        Args:
+            node_id: ID of the node
+            
+        Returns:
+            Context data with version information
+        """
+        return self.contexts.get(node_id, {
+            "data": {},
+            "version": None,
+            "timestamp": None
+        })
+
+    def clear_context(self, node_id: str) -> None:
+        """Clear context for a node.
+        
+        Args:
+            node_id: ID of the node
+        """
+        if node_id in self.contexts:
+            del self.contexts[node_id]
+            logger.debug(f"Cleared context for node {node_id}")
+
+    def get_usage_stats(self) -> Dict[str, Dict[str, int]]:
+        """Get usage statistics for all nodes.
+        
+        Returns:
+            Dictionary of usage statistics by node ID
+        """
+        return self.usage_stats
 
     def _optimize_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Optimize context to fit within token limit"""
         result = {}
-        remaining_tokens = self.max_tokens
+        remaining_tokens = self.max_context_tokens
         
         # First pass: include short values and high-priority keys
         high_priority = {"prompt", "system", "output", "error"}
@@ -108,19 +138,8 @@ class ContextManager:
 
     def get_context_with_optimization(self, node_id: str, include_parents: bool = True) -> Dict[str, Any]:
         """Compatibility method for existing code"""
-        return self.get_context(node_id, include_parents)
+        return self.get_context(node_id)
 
-    def clear_context(self, node_id: Optional[str] = None) -> None:
-        """Clear context for a node or all nodes"""
-        if node_id is None:
-            self._context.clear()
-            self._token_counts.clear()
-            self._usage_stats.clear()
-        else:
-            self._context.pop(node_id, None)
-            self._token_counts.pop(node_id, None)
-            self._usage_stats.pop(node_id, None)
-            
     def track_usage(self, usage: 'UsageMetadata') -> None:
         """Track token usage for a node.
         
@@ -129,25 +148,18 @@ class ContextManager:
         """
         # Store the usage stats
         node_id = getattr(usage, 'node_id', 'unknown')
-        self._usage_stats[node_id] = usage
+        self.usage_stats[node_id] = {
+            "total_tokens": usage.total_tokens or 0,
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
         # Update token counts if needed
-        if node_id in self._token_counts:
+        if node_id in self.usage_stats:
             # Add the total tokens to the existing count
-            self._token_counts[node_id] += usage.total_tokens or 0
+            self.usage_stats[node_id]["total_tokens"] += usage.total_tokens or 0
         else:
             # Create a new entry if it doesn't exist
-            self._token_counts[node_id] = usage.total_tokens or 0
-            
-    def get_usage_stats(self, node_id: Optional[str] = None) -> Dict[str, 'UsageMetadata']:
-        """Get usage statistics for a node or all nodes.
-        
-        Args:
-            node_id: The node ID to get usage stats for, or None for all nodes
-            
-        Returns:
-            A dictionary of node IDs to usage metadata
-        """
-        if node_id is None:
-            return self._usage_stats
-        return {node_id: self._usage_stats.get(node_id)}
+            self.usage_stats[node_id] = {
+                "total_tokens": usage.total_tokens or 0,
+                "timestamp": datetime.utcnow().isoformat()
+            }
