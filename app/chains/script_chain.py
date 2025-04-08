@@ -4,13 +4,14 @@ Main workflow orchestration chain for LLM nodes
 
 from datetime import datetime
 import networkx as nx
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata, UsageMetadata
 from app.models.config import LLMConfig, MessageTemplate
 from app.nodes.text_generation import TextGenerationNode
 from app.utils.context import ContextManager
 from app.utils.retry import AsyncRetry
 from app.nodes.base import BaseNode
+from app.utils.callbacks import ScriptChainCallback
 import logging
 
 logger = logging.getLogger(__name__)
@@ -22,19 +23,26 @@ class ScriptChain:
         graph: NetworkX graph representing workflow
         context: State management across nodes
         retry: Retry configuration for API calls
+        callbacks: List of callback handlers
     """
     
-    def __init__(self, max_context_tokens: int = 4000):
+    def __init__(
+        self,
+        max_context_tokens: int = 4000,
+        callbacks: Optional[List[ScriptChainCallback]] = None
+    ):
         """Initialize the script chain.
         
         Args:
             max_context_tokens: Maximum number of tokens allowed in the context
+            callbacks: Optional list of callback handlers
         """
         self.graph = nx.DiGraph()
         self.context = ContextManager(max_context_tokens)
         self.logger = logging.getLogger(__name__)
         self.nodes: Dict[str, BaseNode] = {}
         self.retry = None
+        self.callbacks = callbacks or []
         
         # Override the _get_parent_nodes method in the context manager
         self.context._get_parent_nodes = self._get_parent_nodes
@@ -92,9 +100,22 @@ class ScriptChain:
             # Get execution order from graph
             execution_order = list(nx.topological_sort(self.graph))
             
+            # Notify chain start
+            chain_id = f"chain_{datetime.utcnow().timestamp()}"
+            chain_config = {
+                "node_count": len(self.nodes),
+                "execution_order": execution_order
+            }
+            for callback in self.callbacks:
+                await callback.on_chain_start(chain_id, chain_config)
+            
             # Execute nodes in order
             for node_id in execution_order:
                 node = self.nodes[node_id]
+                
+                # Notify node start
+                for callback in self.callbacks:
+                    await callback.on_node_start(node_id, node.config)
                 
                 # Get inputs from dependencies and node's context
                 context = self.context.get_context_with_optimization(node_id)
@@ -115,9 +136,31 @@ class ScriptChain:
                 # Update context with node's output
                 if result.success and result.output:
                     self.context.set_context(node_id, {"output": result.output})
+                    # Notify context update
+                    for callback in self.callbacks:
+                        await callback.on_context_update(
+                            node_id,
+                            {"output": result.output},
+                            {"timestamp": datetime.utcnow().isoformat()}
+                        )
+                
+                # Notify node completion
+                for callback in self.callbacks:
+                    await callback.on_node_complete(
+                        node_id,
+                        result,
+                        result.usage
+                    )
                 
                 # Stop execution if node failed
                 if not result.success:
+                    # Notify node error
+                    for callback in self.callbacks:
+                        await callback.on_node_error(
+                            node_id,
+                            Exception(result.error) if result.error else Exception("Unknown error"),
+                            context
+                        )
                     break
             
             # Create combined result
@@ -139,7 +182,7 @@ class ScriptChain:
                     total_usage.api_calls = (total_usage.api_calls or 0) + (usage.api_calls or 0)
             
             # Create the final result
-            return NodeExecutionResult(
+            result = NodeExecutionResult(
                 success=success,
                 output=final_result.output if success else None,
                 error=final_result.error if not success else None,
@@ -156,9 +199,29 @@ class ScriptChain:
                 usage=total_usage
             )
             
+            # Notify chain end
+            for callback in self.callbacks:
+                await callback.on_chain_end(chain_id, {
+                    "success": success,
+                    "output": result.output,
+                    "error": result.error,
+                    "usage": total_usage.dict() if total_usage else None
+                })
+            
+            return result
+            
         except Exception as e:
             # Handle unexpected errors
             logger.error(f"Chain execution failed: {str(e)}", exc_info=True)
+            
+            # Notify chain end with error
+            for callback in self.callbacks:
+                await callback.on_chain_end(chain_id, {
+                    "success": False,
+                    "error": str(e),
+                    "error_type": "ChainError"
+                })
+            
             return NodeExecutionResult(
                 success=False,
                 output=None,

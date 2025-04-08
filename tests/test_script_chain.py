@@ -16,6 +16,7 @@ from app.models.node_models import (
 from app.models.config import LLMConfig, MessageTemplate
 from app.nodes.text_generation import TextGenerationNode
 from app.utils.context import ContextManager
+from app.utils.debug_callback import DebugCallback
 import os
 
 # Get API key from environment
@@ -214,4 +215,163 @@ async def test_workflow_execution(script_chain, llm_config):
     assert all(node_id in results for node_id in node_ids)
     assert all(isinstance(result, NodeExecutionResult) for result in results.values())
     assert all(result.success for result in results.values())
-    assert all(isinstance(result.output, str) for result in results.values()) 
+    assert all(isinstance(result.output, str) for result in results.values())
+
+@pytest.mark.asyncio
+async def test_script_chain_callbacks():
+    """Test that callbacks are properly invoked during chain execution."""
+    # Create a debug callback
+    debug_callback = DebugCallback()
+    
+    # Create a simple chain with two nodes
+    chain = ScriptChain(callbacks=[debug_callback])
+    
+    # Add nodes
+    node1 = TextGenerationNode(
+        node_id="node1",
+        config=NodeConfig(
+            model="gpt-3.5-turbo",
+            temperature=0.7,
+            max_tokens=100,
+            messages=[
+                MessageTemplate(
+                    role="user",
+                    content="Generate a short poem about {topic}"
+                )
+            ]
+        )
+    )
+    
+    node2 = TextGenerationNode(
+        node_id="node2",
+        config=NodeConfig(
+            model="gpt-3.5-turbo",
+            temperature=0.7,
+            max_tokens=100,
+            messages=[
+                MessageTemplate(
+                    role="user",
+                    content="Summarize this poem: {output}"
+                )
+            ]
+        )
+    )
+    
+    chain.add_node(node1)
+    chain.add_node(node2)
+    chain.add_edge("node1", "node2")
+    
+    # Execute the chain
+    result = await chain.execute()
+    
+    # Verify the result
+    assert result.success
+    assert result.output is not None
+    assert result.error is None
+    
+    # Verify that all callback events were logged
+    assert len(debug_callback.events) >= 6  # At least chain start, 2 node starts, 2 node completes, chain end
+    
+    # Verify chain start event
+    chain_start = next(e for e in debug_callback.events if e["event"] == "chain_start")
+    assert chain_start["chain_id"].startswith("chain_")
+    assert chain_start["config"]["node_count"] == 2
+    assert "node1" in chain_start["config"]["execution_order"]
+    assert "node2" in chain_start["config"]["execution_order"]
+    
+    # Verify node start events
+    node1_start = next(e for e in debug_callback.events if e["event"] == "node_start" and e["node_id"] == "node1")
+    assert node1_start["config"]["model"] == "gpt-3.5-turbo"
+    
+    node2_start = next(e for e in debug_callback.events if e["event"] == "node_start" and e["node_id"] == "node2")
+    assert node2_start["config"]["model"] == "gpt-3.5-turbo"
+    
+    # Verify node complete events
+    node1_complete = next(e for e in debug_callback.events if e["event"] == "node_complete" and e["node_id"] == "node1")
+    assert node1_complete["result"].success
+    assert node1_complete["result"].output is not None
+    
+    node2_complete = next(e for e in debug_callback.events if e["event"] == "node_complete" and e["node_id"] == "node2")
+    assert node2_complete["result"].success
+    assert node2_complete["result"].output is not None
+    
+    # Verify context update events
+    context_updates = [e for e in debug_callback.events if e["event"] == "context_update"]
+    assert len(context_updates) >= 2  # At least one update per node
+    
+    # Verify chain end event
+    chain_end = next(e for e in debug_callback.events if e["event"] == "chain_end")
+    assert chain_end["result"]["success"]
+    assert chain_end["result"]["output"] is not None
+    assert chain_end["result"]["error"] is None
+    assert chain_end["result"]["usage"] is not None
+
+@pytest.mark.asyncio
+async def test_callback_events(script_chain, llm_config):
+    """Test that all callback events are properly triggered during chain execution."""
+    # Create a debug callback
+    debug_callback = DebugCallback()
+    script_chain.callbacks = [debug_callback]
+    
+    # Create nodes
+    node1 = TextGenerationNode.create(llm_config)
+    node2 = TextGenerationNode.create(llm_config)
+    
+    # Add nodes to chain
+    script_chain.add_node(node1)
+    script_chain.add_node(node2)
+    script_chain.add_edge(node1.node_id, node2.node_id)
+    
+    # Set initial context
+    script_chain.context.set_context(node1.node_id, {
+        "prompt": "Generate a short poem about nature."
+    })
+    script_chain.context.set_context(node2.node_id, {
+        "prompt": "Summarize this poem: {output}"
+    })
+    
+    # Execute chain
+    result = await script_chain.execute()
+    
+    # Verify chain execution was successful
+    assert result.success
+    assert result.output is not None
+    
+    # Verify that all callback events were logged
+    events = debug_callback.events
+    assert len(events) >= 6  # At least chain start, 2 node starts, 2 node completes, chain end
+    
+    # Verify chain start event
+    chain_start = next(e for e in events if e["event"] == "chain_start")
+    assert chain_start["chain_id"].startswith("chain_")
+    assert chain_start["config"]["node_count"] == 2
+    assert "execution_order" in chain_start["config"]
+    
+    # Verify node start events
+    node1_start = next(e for e in events if e["event"] == "node_start" and e["node_id"] == node1.node_id)
+    assert node1_start["config"].llm_config.model == llm_config.model
+    
+    node2_start = next(e for e in events if e["event"] == "node_start" and e["node_id"] == node2.node_id)
+    assert node2_start["config"].llm_config.model == llm_config.model
+    
+    # Verify node complete events
+    node1_complete = next(e for e in events if e["event"] == "node_complete" and e["node_id"] == node1.node_id)
+    assert node1_complete["result"].success
+    assert node1_complete["result"].output is not None
+    assert node1_complete["result"].usage is not None
+    
+    node2_complete = next(e for e in events if e["event"] == "node_complete" and e["node_id"] == node2.node_id)
+    assert node2_complete["result"].success
+    assert node2_complete["result"].output is not None
+    assert node2_complete["result"].usage is not None
+    
+    # Verify context update events
+    context_updates = [e for e in events if e["event"] == "context_update"]
+    assert len(context_updates) >= 2  # At least one update per node
+    
+    # Verify chain end event
+    chain_end = next(e for e in events if e["event"] == "chain_end")
+    assert chain_end["result"]["success"]
+    assert chain_end["result"]["output"] is not None
+    assert chain_end["result"]["error"] is None
+    assert chain_end["result"]["usage"] is not None 
