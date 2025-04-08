@@ -1,9 +1,9 @@
 """
-Node implementations for workflow processing
+Node implementations for the workflow engine
 """
 
 from app.nodes.base import BaseNode
-from app.nodes.ai_nodes import TextGenerationNode
+from app.nodes.text_generation import TextGenerationNode
 
 __all__ = [
     "BaseNode",

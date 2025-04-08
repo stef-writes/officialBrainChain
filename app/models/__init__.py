@@ -1,14 +1,15 @@
 """
-Data models and configurations
+Data models and configurations for LLM nodes
 """
 
 from app.models.config import MessageTemplate, LLMConfig
-from app.models.nodes import (
+from app.models.node_models import (
     NodeConfig,
     NodeMetadata,
     NodeExecutionRecord,
     NodeExecutionResult,
-    NodeIO
+    NodeIO,
+    UsageMetadata
 )
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "NodeMetadata",
     "NodeExecutionRecord",
     "NodeExecutionResult",
-    "NodeIO"
+    "NodeIO",
+    "UsageMetadata"
 ]

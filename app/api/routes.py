@@ -1,74 +1,79 @@
 """
-API routes for the application
+API routes for the workflow engine
 """
 
-from itertools import chain
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Depends
+from typing import Dict, List, Optional, Any
 from pydantic import BaseModel
-from typing import Dict, Any
-
+from app.models.node_models import NodeConfig, NodeExecutionResult
+from app.models.config import LLMConfig, MessageTemplate
+from app.nodes.text_generation import TextGenerationNode
 from app.chains.script_chain import ScriptChain
-from app.nodes.ai_nodes import TextGenerationNode
-from app.nodes.logic_nodes import DecisionNode
-from app.utils.logging import logger
+from app.utils.context import ContextManager
 
 router = APIRouter()
 
-class NodeConfig(BaseModel):
-    id: str
-    type: str
-    config: dict
+class NodeRequest(BaseModel):
+    """Request model for node operations"""
+    config: NodeConfig
+    context: Optional[Dict[str, Any]] = None
 
-@router.post("/nodes")
-async def create_node(config: NodeConfig):
-    """Add node to workflow"""
-    node_map = {
-        "text_generation": TextGenerationNode,
-        "decision": DecisionNode
-    }
-    
-    try:
-        node_class = node_map[config.type]
-        node = node_class(
-            node_id=config.id,
-            node_type=config.type,
-            **config.config
-        )
-        chain.add_node(node)
-        return {"status": "success"}
-    except KeyError:
-        raise HTTPException(400, "Invalid node type")
+class ChainRequest(BaseModel):
+    """Request model for chain operations"""
+    nodes: List[NodeConfig]
+    context: Optional[Dict[str, Any]] = None
 
-@router.post("/execute")
-async def execute_workflow():
-    """Execute full workflow"""
+@router.post("/nodes/text-generation", response_model=NodeExecutionResult)
+async def create_text_generation_node(request: NodeRequest):
+    """Create and execute a text generation node"""
     try:
-        results = await chain.execute()
-        return {
-            "results": results,
-            "stats": chain.context.get_stats()
-        }
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@router.post("/generate")
-async def generate_text(request: Request, data: Dict[str, Any]):
-    """Generate text using the AI model"""
-    try:
-        node = TextGenerationNode()
-        result = await node.execute(data)
+        node = TextGenerationNode(request.config)
+        result = await node.execute(request.context or {})
         return result
     except Exception as e:
-        logger.error(f"Error generating text: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/decide")
-async def make_decision(request: Request, data: Dict[str, Any]):
-    """Make a decision using the decision node"""
+@router.post("/chains/execute", response_model=NodeExecutionResult)
+async def execute_chain(request: ChainRequest):
+    """Execute a chain of nodes"""
     try:
-        node = DecisionNode()
-        result = await node.execute(data)
+        chain = ScriptChain()
+        
+        # Add nodes to chain
+        for node_config in request.nodes:
+            if node_config.metadata.node_type == "ai":
+                node = TextGenerationNode(node_config)
+                chain.add_node(node)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported node type: {node_config.metadata.node_type}"
+                )
+        
+        # Execute chain
+        result = await chain.execute()
         return result
     except Exception as e:
-        logger.error(f"Error making decision: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/nodes/{node_id}/context")
+async def get_node_context(node_id: str):
+    """Get context for a specific node"""
+    try:
+        context_manager = ContextManager()
+        context = context_manager.get_context(node_id)
+        if context is None:
+            raise HTTPException(status_code=404, detail=f"Context not found for node {node_id}")
+        return context
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/nodes/{node_id}/context")
+async def clear_node_context(node_id: str):
+    """Clear context for a specific node"""
+    try:
+        context_manager = ContextManager()
+        context_manager.clear_context(node_id)
+        return {"message": f"Context cleared for node {node_id}"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

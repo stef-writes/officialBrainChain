@@ -4,7 +4,7 @@ Base node implementation defining the interface for all nodes
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any
-from app.models.nodes import NodeConfig, NodeExecutionResult
+from app.models.node_models import NodeConfig, NodeExecutionResult
 
 class BaseNode(ABC):
     """Abstract base class for all nodes"""

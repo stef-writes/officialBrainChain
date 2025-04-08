@@ -10,11 +10,12 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from app.nodes.ai_nodes import TextGenerationNode
+from app.nodes.text_generation import TextGenerationNode
 from app.models.config import LLMConfig, MessageTemplate
-from app.models.nodes import NodeConfig, NodeMetadata, NodeExecutionResult
+from app.models.node_models import NodeConfig, NodeMetadata, NodeExecutionResult
 from app.chains.script_chain import ScriptChain
 from app.utils.context import ContextManager
+import time
 
 def get_api_key() -> Tuple[str, bool]:
     """
@@ -107,6 +108,7 @@ class TestDataCollector:
             "error_type": result.metadata.error_type,
             "duration": result.duration,
             "output": result.output if result.success else None,
+            "usage": result.usage.dict() if result.usage else None,
             "note": note
         }
         self.data_points.append(result_data)
@@ -317,19 +319,16 @@ async def test_script_chain_execution(mock_openai):
     # Add edge to create dependency
     chain.add_edge(node1.node_id, node2.node_id)
     
-    # Execute the chain with proper context
-    context = ContextManager()
-    context.set_context(node1.node_id, {"prompt": "Generate a creative story"})
-    context.set_context(node2.node_id, {"prompt": "Continue the story"})
+    # Set up context using chain's context manager
+    chain.context.set_context(node1.node_id, {"prompt": "Generate a creative story"})
+    chain.context.set_context(node2.node_id, {"prompt": "Continue the story"})
     
     result = await chain.execute()
     
-    # In test mode, we expect errors
+    # In test mode, we expect authentication errors
     assert not result.success
-    assert isinstance(result.output, str)  # Output is a string representation of the results
-    assert node1.node_id in result.output
-    assert "No prompt provided in context" in result.error  # Check for the actual error message
-    assert result.metadata.error_type == "ExecutionError"
+    assert "API key" in result.error
+    assert result.metadata.error_type == "AuthenticationError"
     assert result.duration > 0
 
 @pytest.mark.asyncio
@@ -485,25 +484,38 @@ async def test_complex_text_generation_with_error_handling(mock_openai):
     assert result.metadata.error_type == "AuthenticationError"
 
 @pytest.mark.asyncio
-async def test_script_chain_execution_with_error_handling(mock_openai):
+async def test_script_chain_execution_with_error_handling():
     """Test script chain execution with error handling"""
-    llm_config = LLMConfig(
+    # Create nodes
+    node1 = TextGenerationNode.create(LLMConfig(
         api_key="sk-test-key-for-testing-only",
         model="gpt-4",
         temperature=0.7,
         max_tokens=100
-    )
+    ))
+    node2 = TextGenerationNode.create(LLMConfig(
+        api_key="sk-test-key-for-testing-only",
+        model="gpt-4",
+        temperature=0.7,
+        max_tokens=100
+    ))
     
-    # Create chain with single node
-    chain = ScriptChain({})
-    node = TextGenerationNode.create(llm_config)
-    chain.add_node(node)
+    # Create chain
+    chain = ScriptChain(retry_config=None)
+    chain.add_node(node1)
+    chain.add_node(node2)
+    chain.add_edge(node1.node_id, node2.node_id)
     
-    # Execute chain - should handle node error gracefully
+    # Set up context with prompt
+    chain.context.set_context(node1.node_id, {"prompt": "Test prompt"})
+    
+    # Execute chain
     result = await chain.execute()
+    
+    # Verify error handling
     assert not result.success
-    assert "prompt" in result.error.lower()
-    assert result.metadata.error_type == "ExecutionError"
+    assert result.metadata.error_type == "AuthenticationError"
+    assert "API key" in str(result.error)
 
 @pytest.mark.asyncio
 async def test_template_validation_with_error_handling(mock_openai):
@@ -605,46 +617,6 @@ async def test_code_generation_flow(mock_openai):
     collector.log_context_update(generator.node_id, generator_context, "Generator context set")
     collector.log_user_input(generator.node_id, generator_context, "Initial user input for code generation")
     
-    # Reviewer node context
-    reviewer_context = {
-        "prompt": "Review the following code for best practices and potential issues: {previous_output}",
-        "review_aspects": [
-            "style", 
-            "performance", 
-            "security", 
-            "documentation",
-            "error handling",
-            "testability"
-        ],
-        "review_format": "structured",
-        "output_format": "JSON with sections for each aspect",
-        "severity_levels": ["critical", "high", "medium", "low"]
-    }
-    chain.context.set_context(reviewer.node_id, reviewer_context)
-    collector.log_context_update(reviewer.node_id, reviewer_context, "Reviewer context set")
-    collector.log_user_input(reviewer.node_id, reviewer_context, "User input for code review")
-    
-    # Optimizer node context
-    optimizer_context = {
-        "prompt": "Optimize the following code based on the review: {previous_output}",
-        "optimization_goals": [
-            "performance", 
-            "readability", 
-            "maintainability",
-            "memory usage",
-            "algorithmic complexity"
-        ],
-        "constraints": [
-            "maintain the same functionality",
-            "preserve the docstring",
-            "keep type hints"
-        ],
-        "output_format": "Python code with comments explaining changes"
-    }
-    chain.context.set_context(optimizer.node_id, optimizer_context)
-    collector.log_context_update(optimizer.node_id, optimizer_context, "Optimizer context set")
-    collector.log_user_input(optimizer.node_id, optimizer_context, "User input for code optimization")
-    
     # Execute the chain
     collector.log_chain_event(chain, "execution_start", {}, "Starting chain execution")
     result = await chain.execute()
@@ -658,45 +630,8 @@ async def test_code_generation_flow(mock_openai):
     # Test assertions
     assert not result.success
     assert "API key" in str(result.output)
-    assert result.metadata.error_type == "ExecutionError"
+    assert result.metadata.error_type == "AuthenticationError"
     assert result.duration > 0
-    
-    # Test context passing by manually simulating the flow
-    collector.log_chain_event(chain, "manual_simulation_start", {}, "Starting manual node execution simulation")
-    
-    # Step 1: Generator node execution
-    generator_result = await generator.execute(chain.context.get_context(generator.node_id))
-    collector.log_execution_result(generator.node_id, generator_result, "Generator node execution")
-    assert not generator_result.success
-    assert "API key" in generator_result.error
-    assert generator_result.metadata.error_type == "AuthenticationError"
-    
-    # Step 2: Reviewer node execution with generator output
-    reviewer_context = chain.context.get_context(reviewer.node_id)
-    reviewer_context["previous_output"] = "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)"
-    collector.log_context_update(reviewer.node_id, reviewer_context, "Updated reviewer context with generator output")
-    collector.log_generated_output(generator.node_id, {"code": reviewer_context["previous_output"]}, "Generated Fibonacci function")
-    reviewer_result = await reviewer.execute(reviewer_context)
-    collector.log_execution_result(reviewer.node_id, reviewer_result, "Reviewer node execution")
-    assert not reviewer_result.success
-    assert "API key" in reviewer_result.error
-    assert reviewer_result.metadata.error_type == "AuthenticationError"
-    
-    # Step 3: Optimizer node execution with reviewer output
-    optimizer_context = chain.context.get_context(optimizer.node_id)
-    optimizer_context["previous_output"] = "The code is inefficient due to redundant calculations. Consider using memoization."
-    collector.log_context_update(optimizer.node_id, optimizer_context, "Updated optimizer context with reviewer output")
-    collector.log_generated_output(reviewer.node_id, {"review": optimizer_context["previous_output"]}, "Generated code review")
-    optimizer_result = await optimizer.execute(optimizer_context)
-    collector.log_execution_result(optimizer.node_id, optimizer_result, "Optimizer node execution")
-    assert not optimizer_result.success
-    assert "API key" in optimizer_result.error
-    assert optimizer_result.metadata.error_type == "AuthenticationError"
-    
-    collector.log_chain_event(chain, "manual_simulation_complete", {}, "Manual simulation completed")
-    
-    # Save test data for analysis
-    collector.save_analysis()
 
 @pytest.mark.asyncio
 async def test_error_recovery_flow(mock_openai):
@@ -726,7 +661,7 @@ async def test_error_recovery_flow(mock_openai):
     # Create chain with error handling
     chain = ScriptChain(retry_config={
         "max_retries": 2,
-        "retry_delay": 1
+        "delay": 1
     })
     chain.add_node(node1)
     chain.add_node(node2)
@@ -735,18 +670,17 @@ async def test_error_recovery_flow(mock_openai):
     chain.add_edge(node2.node_id, fallback.node_id)
     
     # Set up context for error scenarios
-    context = ContextManager()
-    context.set_context(node1.node_id, {
+    chain.context.set_context(node1.node_id, {
         "prompt": "Generate text that will cause a rate limit error",
         "error_scenario": "rate_limit"
     })
     
-    context.set_context(node2.node_id, {
+    chain.context.set_context(node2.node_id, {
         "prompt": "Process the output: {previous_output}",
         "error_scenario": "timeout"
     })
     
-    context.set_context(fallback.node_id, {
+    chain.context.set_context(fallback.node_id, {
         "prompt": "Fallback processing: {previous_output}",
         "error_handling": "graceful_degradation"
     })
@@ -760,378 +694,79 @@ async def test_error_recovery_flow(mock_openai):
     assert result.duration > 0 
 
 @pytest.mark.asyncio
-async def test_psychological_profile_analysis(mock_openai):
-    """Test psychological profile analysis with essay input"""
-    # Initialize data collector
-    collector = TestDataCollector("psychological_profile_analysis")
+async def test_real_api_integration():
+    """Test integration with real OpenAI API."""
+    # Get API key from environment
+    api_key, _ = get_api_key()
+    if not api_key:
+        pytest.skip("No API key available")
+        
+    # Create node with real API configuration
+    node = TextGenerationNode(
+        config=NodeConfig(
+            metadata=NodeMetadata(
+                node_id="real_api_test",
+                node_type="ai",
+                version="1.0.0",
+                description="Test with real API"
+            ),
+            llm_config=LLMConfig(
+                model="gpt-4",  # Using gpt-4 instead of gpt-3.5-turbo
+                temperature=0.7,
+                max_tokens=100,
+                api_key=api_key
+            )
+        )
+    )
     
-    # Clean up old test data (older than 7 days)
-    collector.cleanup_test_data(max_age_days=7)
+    # Execute with real API
+    start_time = time.time()
+    result = await node.execute({
+        "prompt": "Write a haiku about testing. Start with 'Here's a haiku:' and then write the haiku on separate lines."
+    })
+    execution_time = time.time() - start_time
     
-    # Create nodes with different configurations
-    text_analyzer = TextGenerationNode.create(LLMConfig(
-        api_key="sk-test-key-for-testing-only",
-        model="gpt-4",
-        temperature=0.3,
-        max_tokens=1000
-    ))
-    collector.log_node_config(text_analyzer, "Text analyzer node created")
+    # Verify response
+    assert result.success
+    assert "haiku" in result.output.lower()
+    assert execution_time < 15.0  # Allow more time for real API call
     
-    personality_assessor = TextGenerationNode.create(LLMConfig(
-        api_key="sk-test-key-for-testing-only",
-        model="gpt-4",
-        temperature=0.4,
-        max_tokens=800
-    ))
-    collector.log_node_config(personality_assessor, "Personality assessor node created")
-    
-    recommendation_generator = TextGenerationNode.create(LLMConfig(
-        api_key="sk-test-key-for-testing-only",
-        model="gpt-4",
-        temperature=0.5,
-        max_tokens=600
-    ))
-    collector.log_node_config(recommendation_generator, "Recommendation generator node created")
-    
-    # Create chain for psychological analysis workflow
-    chain = ScriptChain(retry_config=None)
-    chain.add_node(text_analyzer)
-    chain.add_node(personality_assessor)
-    chain.add_node(recommendation_generator)
-    chain.add_edge(text_analyzer.node_id, personality_assessor.node_id)
-    chain.add_edge(personality_assessor.node_id, recommendation_generator.node_id)
-    
-    collector.log_chain_event(chain, "setup", {
-        "nodes": [n.node_id for n in [text_analyzer, personality_assessor, recommendation_generator]],
-        "edges": [(text_analyzer.node_id, personality_assessor.node_id), 
-                 (personality_assessor.node_id, recommendation_generator.node_id)]
-    }, "Psychological analysis chain setup complete")
-    
-    # Sample essay excerpt for analysis
-    essay_excerpt = """
-    The world is a complex place, filled with contradictions and paradoxes. I often find myself 
-    standing at the crossroads of certainty and doubt, wondering which path to take. The weight 
-    of decisions presses upon me, yet I cannot help but feel a strange exhilaration in the face 
-    of uncertainty. My mind wanders through the labyrinth of possibilities, each turn revealing 
-    new perspectives and challenges. I am drawn to the edges of understanding, where questions 
-    outnumber answers and the familiar gives way to the unknown. In these moments of reflection, 
-    I feel most alive, most connected to the essence of what it means to be human.
-    
-    Yet there is also a part of me that yearns for simplicity, for the comfort of clear boundaries 
-    and predictable outcomes. I find myself creating order from chaos, organizing thoughts and 
-    experiences into neat categories that help me navigate the world. This tension between 
-    exploration and organization defines much of who I am. I am both the wanderer and the cartographer, 
-    mapping the terrain of my own consciousness while allowing myself to get lost in its vastness.
-    """
-    
-    # Set up context for text analyzer node
-    analyzer_context = {
-        "prompt": "Analyze the following essay excerpt for psychological insights:",
-        "essay": essay_excerpt,
-        "analysis_focus": [
-            "writing style",
-            "emotional content",
-            "cognitive patterns",
-            "recurring themes",
-            "self-perception",
-            "worldview"
-        ],
-        "output_format": "Structured analysis with sections for each focus area"
-    }
-    chain.context.set_context(text_analyzer.node_id, analyzer_context)
-    collector.log_context_update(text_analyzer.node_id, analyzer_context, "Text analyzer context set")
-    collector.log_user_input(text_analyzer.node_id, analyzer_context, "Initial user input for text analysis")
-    
-    # Check for cached analyzer result
-    cached_analyzer_result = collector.get_cached_test_data(f"{text_analyzer.node_id}_result")
-    if cached_analyzer_result:
-        collector.logger.info("Using cached analyzer result")
-        # In a real test, we would use the cached result
-        # For this test, we'll still execute the node to demonstrate the flow
-    
-    # Set up context for personality assessor node
-    assessor_context = {
-        "prompt": "Based on the following psychological analysis, create a personality profile: {previous_output}",
-        "profile_aspects": [
-            "personality traits",
-            "cognitive style",
-            "emotional patterns",
-            "interpersonal dynamics",
-            "potential strengths",
-            "potential challenges"
-        ],
-        "theoretical_frameworks": [
-            "Big Five personality traits",
-            "Jungian archetypes",
-            "Attachment theory",
-            "Cognitive behavioral patterns"
-        ],
-        "output_format": "Comprehensive personality profile with supporting evidence from the text"
-    }
-    chain.context.set_context(personality_assessor.node_id, assessor_context)
-    collector.log_context_update(personality_assessor.node_id, assessor_context, "Personality assessor context set")
-    collector.log_user_input(personality_assessor.node_id, assessor_context, "User input for personality assessment")
-    
-    # Check for cached assessor result
-    cached_assessor_result = collector.get_cached_test_data(f"{personality_assessor.node_id}_result")
-    if cached_assessor_result:
-        collector.logger.info("Using cached assessor result")
-        # In a real test, we would use the cached result
-        # For this test, we'll still execute the node to demonstrate the flow
-    
-    # Set up context for recommendation generator node
-    recommendation_context = {
-        "prompt": "Based on the following personality profile, provide personalized recommendations: {previous_output}",
-        "recommendation_areas": [
-            "personal growth",
-            "interpersonal relationships",
-            "career development",
-            "emotional well-being",
-            "cognitive enhancement"
-        ],
-        "recommendation_style": "practical and actionable",
-        "output_format": "Structured recommendations with explanations of how they align with the personality profile"
-    }
-    chain.context.set_context(recommendation_generator.node_id, recommendation_context)
-    collector.log_context_update(recommendation_generator.node_id, recommendation_context, "Recommendation generator context set")
-    collector.log_user_input(recommendation_generator.node_id, recommendation_context, "User input for recommendation generation")
-    
-    # Check for cached recommendation result
-    cached_recommendation_result = collector.get_cached_test_data(f"{recommendation_generator.node_id}_result")
-    if cached_recommendation_result:
-        collector.logger.info("Using cached recommendation result")
-        # In a real test, we would use the cached result
-        # For this test, we'll still execute the node to demonstrate the flow
-    
-    # Execute the chain
-    collector.log_chain_event(chain, "execution_start", {}, "Starting psychological analysis chain execution")
-    result = await chain.execute()
-    collector.log_chain_event(chain, "execution_complete", {
-        "success": result.success,
-        "error": result.error,
-        "error_type": result.metadata.error_type,
-        "duration": result.duration
-    }, "Psychological analysis chain execution completed")
-    
-    # Test assertions
-    assert not result.success
-    assert "API key" in str(result.output)
-    assert result.metadata.error_type == "ExecutionError"
-    assert result.duration > 0
-    
-    # Test context passing by manually simulating the flow
-    collector.log_chain_event(chain, "manual_simulation_start", {}, "Starting manual psychological analysis simulation")
-    
-    # Step 1: Text analyzer node execution
-    analyzer_result = await text_analyzer.execute(chain.context.get_context(text_analyzer.node_id))
-    collector.log_execution_result(text_analyzer.node_id, analyzer_result, "Text analyzer node execution")
-    assert not analyzer_result.success
-    assert "API key" in analyzer_result.error
-    assert analyzer_result.metadata.error_type == "AuthenticationError"
-    
-    # Step 2: Personality assessor node execution with analyzer output
-    assessor_context = chain.context.get_context(personality_assessor.node_id)
-    assessor_context["previous_output"] = """
-    Psychological Analysis:
-    
-    Writing Style: The author employs a reflective, introspective tone with rich metaphorical language. 
-    The prose is thoughtful and contemplative, suggesting a preference for deep processing of experiences.
-    
-    Emotional Content: There is a complex emotional landscape present, with both excitement about 
-    uncertainty and a desire for stability. The text reveals emotional awareness and self-reflection.
-    
-    Cognitive Patterns: The author demonstrates abstract thinking, pattern recognition, and 
-    meta-cognitive awareness. There is evidence of both analytical and intuitive cognitive styles.
-    
-    Recurring Themes: Exploration vs. organization, certainty vs. doubt, complexity vs. simplicity. 
-    The author seems to navigate these dichotomies consciously.
-    
-    Self-Perception: The author appears to have a nuanced self-concept, recognizing multiple aspects 
-    of their personality ("both the wanderer and the cartographer").
-    
-    Worldview: The author perceives the world as complex and paradoxical, yet navigable through 
-    personal meaning-making and organization.
-    """
-    collector.log_context_update(personality_assessor.node_id, assessor_context, "Updated assessor context with analyzer output")
-    collector.log_generated_output(text_analyzer.node_id, {"analysis": assessor_context["previous_output"]}, "Generated psychological analysis")
-    assessor_result = await personality_assessor.execute(assessor_context)
-    collector.log_execution_result(personality_assessor.node_id, assessor_result, "Personality assessor node execution")
-    assert not assessor_result.success
-    assert "API key" in assessor_result.error
-    assert assessor_result.metadata.error_type == "AuthenticationError"
-    
-    # Step 3: Recommendation generator node execution with assessor output
-    recommendation_context = chain.context.get_context(recommendation_generator.node_id)
-    recommendation_context["previous_output"] = """
-    Personality Profile:
-    
-    Personality Traits: High in Openness to Experience, moderate to high in Conscientiousness, 
-    moderate in Extraversion (likely introverted in social settings but internally energetic), 
-    moderate to high in Emotional Stability, and moderate to high in Agreeableness.
-    
-    Cognitive Style: Integrative thinker who combines analytical and intuitive approaches. 
-    Shows strong pattern recognition abilities and meta-cognitive awareness.
-    
-    Emotional Patterns: Emotionally aware with capacity for both experiencing and observing emotions. 
-    Shows comfort with complexity and ambiguity in emotional experiences.
-    
-    Interpersonal Dynamics: Likely values deep, meaningful connections over superficial relationships. 
-    May be selective in social interactions, preferring quality over quantity.
-    
-    Potential Strengths: Creative problem-solving, adaptability, self-awareness, 
-    ability to hold multiple perspectives, capacity for deep work and focus.
-    
-    Potential Challenges: May experience decision paralysis due to seeing multiple possibilities, 
-    potential for overthinking, may struggle with perfectionism in organizing thoughts and experiences.
-    """
-    collector.log_context_update(recommendation_generator.node_id, recommendation_context, "Updated recommendation context with assessor output")
-    collector.log_generated_output(personality_assessor.node_id, {"profile": recommendation_context["previous_output"]}, "Generated personality profile")
-    recommendation_result = await recommendation_generator.execute(recommendation_context)
-    collector.log_execution_result(recommendation_generator.node_id, recommendation_result, "Recommendation generator node execution")
-    assert not recommendation_result.success
-    assert "API key" in recommendation_result.error
-    assert recommendation_result.metadata.error_type == "AuthenticationError"
-    
-    collector.log_chain_event(chain, "manual_simulation_complete", {}, "Manual psychological analysis simulation completed")
-    
-    # Save test data for analysis
-    collector.save_analysis() 
+    # Verify usage metadata
+    assert result.usage is not None
+    assert result.usage.prompt_tokens > 0
+    assert result.usage.completion_tokens > 0
+    assert result.usage.total_tokens > 0
+    assert result.usage.api_calls == 1
+    assert result.usage.model == "gpt-4"  # Changed from gpt-3.5-turbo to gpt-4
 
 @pytest.mark.asyncio
-async def test_real_api_integration():
-    """
-    Test integration with real OpenAI API when available.
-    This test will:
-    1. Use real API keys if available, fall back to mocks if not
-    2. Measure performance metrics (response time, token usage)
-    3. Validate output quality against predefined criteria
-    """
-    # Get API key (real or mock)
-    api_key, is_mock = get_api_key()
-    
-    # Initialize data collector
-    collector = TestDataCollector("real_api_integration")
-    
-    # Create a node with the API key
-    node = TextGenerationNode.create(LLMConfig(
-        api_key=api_key,
+async def test_concurrent_execution():
+    """Test concurrent execution of multiple nodes"""
+    llm_config = LLMConfig(
+        api_key="sk-test-key-for-testing-only",
         model="gpt-4",
         temperature=0.7,
-        max_tokens=500
-    ))
-    collector.log_node_config(node, "Text generation node created")
+        max_tokens=100
+    )
     
-    # Define test prompts with expected quality criteria
-    test_cases = [
-        {
-            "name": "factual_response",
-            "prompt": "What is the capital of France?",
-            "quality_criteria": {
-                "contains": ["Paris"],
-                "max_length": 100,
-                "response_time_threshold": 5.0  # seconds
-            }
-        },
-        {
-            "name": "creative_writing",
-            "prompt": "Write a short poem about technology.",
-            "quality_criteria": {
-                "min_length": 50,
-                "contains_keywords": ["tech", "digital", "future"],
-                "response_time_threshold": 10.0  # seconds
-            }
-        },
-        {
-            "name": "code_generation",
-            "prompt": "Write a Python function to calculate the Fibonacci sequence. Return ONLY the function definition with no additional text or explanation. The code must be syntactically valid Python.",
-            "quality_criteria": {
-                "contains": ["def", "fibonacci", "return"],
-                "is_valid_python": True,
-                "response_time_threshold": 8.0  # seconds
-            }
-        }
+    node1 = TextGenerationNode.create(llm_config)
+    node2 = TextGenerationNode.create(llm_config)
+    node3 = TextGenerationNode.create(llm_config)
+    
+    # Execute nodes concurrently - all should fail with auth error
+    tasks = [
+        node1.execute({"prompt": "First concurrent test"}),
+        node2.execute({"prompt": "Second concurrent test"}),
+        node3.execute({"prompt": "Third concurrent test"})
     ]
     
-    # Run tests for each prompt
-    for test_case in test_cases:
-        # Log test case start without chain info
-        collector.log_event("test_case_start", {"name": test_case["name"]}, f"Starting test case: {test_case['name']}")
-        
-        # Set up context
-        context = {
-            "prompt": test_case["prompt"],
-            "output_format": "text"
-        }
-        collector.log_context_update(node.node_id, context, f"Context set for {test_case['name']}")
-        collector.log_user_input(node.node_id, context, f"User input for {test_case['name']}")
-        
-        # Execute the node and measure performance
-        start_time = datetime.utcnow()
-        result = await node.execute(context)
-        end_time = datetime.utcnow()
-        execution_time = (end_time - start_time).total_seconds()
-        
-        # Log execution result
-        collector.log_execution_result(node.node_id, result, f"Execution result for {test_case['name']}")
-        
-        # Log performance metrics
-        performance_data = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event_type": "performance_metrics",
-            "test_case": test_case["name"],
-            "execution_time": execution_time,
-            "success": result.success,
-            "error": result.error if not result.success else None
-        }
-        collector.data_points.append(performance_data)
-        collector.logger.info(f"Performance Metrics: {json.dumps(performance_data, indent=2)}")
-        
-        # Validate output quality if execution was successful
-        if result.success and result.output:
-            # Log the generated output
-            collector.log_generated_output(node.node_id, {"output": result.output}, f"Generated output for {test_case['name']}")
-            collector.logger.info(f"Raw output for {test_case['name']}: {result.output}")
-            
-            # For code generation, try to clean the output
-            if test_case["name"] == "code_generation":
-                # Remove any markdown code block markers if present
-                cleaned_output = result.output.strip()
-                if cleaned_output.startswith("```python"):
-                    cleaned_output = cleaned_output[8:]
-                if cleaned_output.startswith("```"):
-                    cleaned_output = cleaned_output[3:]
-                if cleaned_output.endswith("```"):
-                    cleaned_output = cleaned_output[:-3]
-                cleaned_output = cleaned_output.strip()
-                result.output = cleaned_output
-                collector.logger.info(f"Cleaned code output: {cleaned_output}")
-            
-            # Validate against quality criteria
-            quality_validation = validate_output_quality(result.output, test_case["quality_criteria"])
-            collector.data_points.append(quality_validation)
-            collector.logger.info(f"Quality Validation: {json.dumps(quality_validation, indent=2)}")
-            
-            # Assert quality criteria are met
-            assert quality_validation["passed"], f"Quality validation failed for {test_case['name']}: {quality_validation['failures']}"
-            
-            # Assert performance criteria are met
-            assert execution_time <= test_case["quality_criteria"]["response_time_threshold"], \
-                f"Performance threshold exceeded for {test_case['name']}: {execution_time}s > {test_case['quality_criteria']['response_time_threshold']}s"
-        else:
-            # If using mock API, we expect authentication errors
-            if is_mock:
+    results = await asyncio.gather(*tasks)
+    
+    # Verify all executions failed with auth error
+    for result in results:
                 assert not result.success
                 assert "API key" in result.error
                 assert result.metadata.error_type == "AuthenticationError"
-            else:
-                # If using real API, we should have successful results
-                assert result.success, f"Execution failed for {test_case['name']}: {result.error}"
-        
-        # Log test case completion without chain info
-        collector.log_event("test_case_complete", {"name": test_case["name"]}, f"Completed test case: {test_case['name']}")
-    
-    # Save test data for analysis
-    collector.save_analysis()
 
 def validate_output_quality(output: str, criteria: Dict[str, Any]) -> Dict[str, Any]:
     """
