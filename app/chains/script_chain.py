@@ -91,7 +91,9 @@ class ScriptChain:
                 context = self.context.get_context(node_id) or {}
                 for pred in self.graph.predecessors(node_id):
                     if pred in results and results[pred].success:
-                        context.update(results[pred].output)
+                        pred_output = results[pred].output
+                        if pred_output is not None:
+                            context.update({"output": pred_output})
                 
                 # Execute node
                 if self.retry:
@@ -100,6 +102,10 @@ class ScriptChain:
                     result = await node.execute(context)
                 
                 results[node_id] = result
+                
+                # Update context with node's output
+                if result.success and result.output:
+                    self._update_context(node_id, result)
                 
                 # Aggregate usage metadata
                 if result.usage:
@@ -159,13 +165,9 @@ class ScriptChain:
     def _update_context(self, node_id: str, result: NodeExecutionResult):
         """Update context with node execution result"""
         if result.success and result.output:
-            self.context.set(
+            self.context.set_context(
                 node_id,
-                result.output,
-                metadata={
-                    "usage": result.usage.dict() if result.usage else {},
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+                {"output": result.output}
             )
     
     def _handle_error(self, node_id: str, error: Exception):
