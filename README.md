@@ -1,24 +1,14 @@
 # Gaffer
 
-A powerful workflow orchestration system for LLM (Large Language Model) nodes.
-
-## Overview
-
-Gaffer is a framework for creating and executing complex workflows involving Large Language Models (LLMs). It provides a flexible and extensible architecture for building AI-powered applications.
+A powerful workflow engine for building and executing AI-powered script chains.
 
 ## Features
 
-- **Directed Graph Workflows**: Create complex workflows with dependencies between nodes
-- **Smart Context Management**: 
-  - Token-aware optimization with dynamic summarization
-  - Intelligent context prioritization based on importance
-  - Automatic context truncation to stay within token limits
-- **Parallel Workflow Execution**: Execute multiple nodes concurrently with proper dependency handling
-- **Robust Error Handling**: Comprehensive error handling with detailed error types and messages
-- **Retry Mechanism**: Handle API call failures and rate limits gracefully
-- **Extensible Node System**: Create custom nodes for different types of operations
-- **Event Callbacks**: Track and monitor workflow execution with customizable callbacks
-- **Comprehensive Testing**: Robust test suite with high coverage
+- **Script Chain Execution**: Build and execute chains of AI nodes
+- **Context Management**: Intelligent context handling with token awareness
+- **Vector Store Integration**: Semantic context retrieval and storage
+- **Callback System**: Comprehensive event tracking and monitoring
+- **Token Optimization**: Smart token allocation and context optimization
 
 ## Installation
 
@@ -33,94 +23,100 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Creating a Simple Chain
+### Basic Script Chain
 
 ```python
 from app.chains.script_chain import ScriptChain
-from app.nodes.text_generation import TextGenerationNode
-from app.models.config import LLMConfig
+from app.models.node_models import NodeConfig
 
-# Create nodes
-node1 = TextGenerationNode.create(LLMConfig(
-    api_key="your-api-key",
-    model="gpt-4",
-    temperature=0.7,
-    max_tokens=100
-))
-
-node2 = TextGenerationNode.create(LLMConfig(
-    api_key="your-api-key",
-    model="gpt-4",
-    temperature=0.5,
-    max_tokens=150
-))
-
-# Create a script chain
+# Create a chain
 chain = ScriptChain()
-chain.add_node(node1)
-chain.add_node(node2)
 
-# Add edge to create dependency
-chain.add_edge(node1.node_id, node2.node_id)
+# Add nodes
+chain.add_node(NodeConfig(
+    id="node1",
+    type="llm",
+    model="gpt-4",
+    prompt="Generate a creative story"
+))
 
-# Set context for nodes
-chain.context.set_context(node1.node_id, {
-    "prompt": "Write a one-sentence story about a cat."
+# Execute the chain
+result = await chain.execute()
+```
+
+### Context Management
+
+The context manager provides intelligent context handling with vector-based retrieval:
+
+```python
+from app.utils.context import ContextManager
+
+# Initialize context manager
+context_manager = ContextManager(max_context_tokens=4000)
+
+# Set context for a node
+context_manager.set_context("node1", {
+    "system": "You are a creative writer",
+    "output": "Once upon a time..."
 })
-chain.context.set_context(node2.node_id, {
-    "prompt": "Continue the story with one more sentence about what happens next."
-})
+
+# Get optimized context with vector retrieval
+context = context_manager.get_context_with_optimization("node1")
+```
+
+### Callback System
+
+Monitor chain execution with the callback system:
+
+```python
+from app.utils.debug_callback import DebugCallback
+
+# Create a debug callback
+callback = DebugCallback()
+
+# Add callback to chain
+chain.add_callback(callback)
 
 # Execute chain
 result = await chain.execute()
 
-# Check result
-print(result.output)
+# Get events
+events = callback.get_events()
 ```
 
-### Using Callbacks
+## Vector Store
 
-```python
-from app.utils.callbacks import ScriptChainCallback
-from app.utils.debug_callback import DebugCallback
+The vector store provides semantic context retrieval:
 
-# Create a custom callback
-class CustomCallback(ScriptChainCallback):
-    async def on_chain_start(self, chain_id: str, config: dict):
-        print(f"Chain {chain_id} started with {config['node_count']} nodes")
+- **Context Storage**: Automatically stores node contexts with metadata
+- **Semantic Search**: Find similar contexts using vector similarity
+- **Token Optimization**: Smart allocation of token budget for vector results
+- **Event Tracking**: Monitor vector operations through the callback system
 
-    async def on_node_complete(self, node_id: str, result: NodeExecutionResult):
-        print(f"Node {node_id} completed with output: {result.output}")
+## Development
 
-# Create chain with callbacks
-chain = ScriptChain(callbacks=[CustomCallback(), DebugCallback()])
+### Running Tests
 
-# Add nodes and execute as normal
-# The callbacks will be triggered at each stage of execution
-result = await chain.execute()
+```bash
+python -m pytest tests/
 ```
 
-### Parallel Workflow Execution
+### Code Style
 
-```python
-# Create multiple nodes
-nodes = [TextGenerationNode.create(llm_config) for _ in range(3)]
-node_ids = [node.node_id for node in nodes]
+```bash
+# Format code
+black .
 
-# Set context for each node
-for i, node_id in enumerate(node_ids):
-    chain.context.set_context(node_id, {
-        "prompt": f"What is {i}+2? Answer in one word."
-    })
+# Sort imports
+isort .
 
-# Execute workflow in parallel
-results = await chain.execute_workflow(nodes, node_ids)
-
-# Process results
-for node_id, result in results.items():
-    if result.success:
-        print(f"Node {node_id}: {result.output}")
+# Type checking
+mypy .
 ```
+
+## License
+
+MIT License
 
 ## Project Structure
 
@@ -178,10 +174,6 @@ Comprehensive error handling includes:
 - API errors
 - Network issues
 - Invalid input validation
-
-## License
-
-MIT
 
 ## Contributing
 

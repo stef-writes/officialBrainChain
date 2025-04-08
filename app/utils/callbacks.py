@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
-from app.models.node_models import NodeConfig, NodeExecutionResult
+from app.models.node_models import NodeConfig, NodeExecutionResult, UsageMetadata
 
 class ScriptChainCallback(ABC):
     """Abstract base class for script chain callbacks."""
@@ -72,5 +72,22 @@ class ScriptChainCallback(ABC):
             metadata: Context metadata including:
                 - version: Unique version identifier
                 - timestamp: ISO format timestamp of the update
+        """
+        pass
+    
+    @abstractmethod
+    async def on_vector_store_op(self,
+        operation: str,  # "store" or "retrieve"
+        node_id: str,
+        context_snippet: str,
+        similarity_score: Optional[float] = None
+    ) -> None:
+        """Called when a vector store operation occurs.
+        
+        Args:
+            operation: Type of operation ("store" or "retrieve")
+            node_id: Unique identifier for the node
+            context_snippet: The context text being stored or retrieved
+            similarity_score: Optional similarity score for retrieval operations
         """
         pass 

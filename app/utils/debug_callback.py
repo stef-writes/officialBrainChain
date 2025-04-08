@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Any, List
 from app.utils.callbacks import ScriptChainCallback
 from app.models.node_models import NodeConfig, NodeExecutionResult
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -15,69 +16,88 @@ class DebugCallback(ScriptChainCallback):
     async def on_chain_start(self, chain_id: str, config: Dict[str, Any]) -> None:
         """Log chain start event."""
         event = {
-            "event": "chain_start",
+            "type": "chain_start",
             "chain_id": chain_id,
-            "config": config
+            "config": config,
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        logger.info(f"Chain {chain_id} started with {config['node_count']} nodes")
+        logger.debug(f"Chain {chain_id} started with config: {config}")
     
     async def on_chain_end(self, chain_id: str, result: Dict[str, Any]) -> None:
         """Log chain end event."""
         event = {
-            "event": "chain_end",
+            "type": "chain_end",
             "chain_id": chain_id,
-            "result": result
+            "result": result,
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        if result["success"]:
-            logger.info(f"Chain {chain_id} completed successfully in {result['duration']} seconds")
-        else:
-            logger.error(f"Chain {chain_id} failed: {result.get('error', 'Unknown error')}")
+        logger.debug(f"Chain {chain_id} ended with result: {result}")
     
     async def on_node_start(self, node_id: str, config: NodeConfig) -> None:
         """Log node start event."""
         event = {
-            "event": "node_start",
+            "type": "node_start",
             "node_id": node_id,
-            "config": config
+            "config": config,
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        logger.info(f"Node {node_id} started execution")
+        logger.debug(f"Node {node_id} started with config: {config}")
     
     async def on_node_complete(self, node_id: str, result: NodeExecutionResult) -> None:
         """Log node completion event."""
         event = {
-            "event": "node_complete",
+            "type": "node_complete",
             "node_id": node_id,
-            "result": result
+            "result": result,
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        if result.success:
-            logger.info(f"Node {node_id} completed successfully")
-        else:
-            logger.error(f"Node {node_id} failed: {result.error}")
+        logger.debug(f"Node {node_id} completed with result: {result}")
     
-    async def on_node_error(self, node_id: str, error: str) -> None:
+    async def on_node_error(self, node_id: str, error: Exception) -> None:
         """Log node error event."""
         event = {
-            "event": "node_error",
+            "type": "node_error",
             "node_id": node_id,
-            "error": error
+            "error": str(error),
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        logger.error(f"Node {node_id} encountered an error: {error}")
+        logger.error(f"Node {node_id} encountered error: {error}")
     
-    async def on_context_update(self, node_id: str, context: Dict[str, Any], metadata: Dict[str, Any]) -> None:
+    async def on_context_update(self, node_id: str, context: Dict[str, Any]) -> None:
         """Log context update event."""
         event = {
-            "event": "context_update",
+            "type": "context_update",
             "node_id": node_id,
             "context": context,
-            "metadata": metadata
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.events.append(event)
-        logger.debug(f"Context updated for node {node_id} (version: {metadata['version']})")
+        logger.debug(f"Context updated for node {node_id}: {context}")
+    
+    async def on_vector_store_op(self,
+        operation: str,
+        node_id: str,
+        context_snippet: str,
+        similarity_score: float = None
+    ) -> None:
+        event = {
+            "type": "vector_store_op",
+            "operation": operation,
+            "node_id": node_id,
+            "context_snippet": context_snippet,
+            "similarity_score": similarity_score,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        self.events.append(event)
+        logger.debug(
+            f"Vector store {operation} for node {node_id}"
+            f"{f' with similarity {similarity_score:.3f}' if similarity_score is not None else ''}"
+        )
     
     def get_events(self) -> List[Dict[str, Any]]:
         """Get all logged events.
