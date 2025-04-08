@@ -71,6 +71,10 @@ def mock_openai_response() -> Dict[str, Any]:
 @pytest.fixture
 def mock_openai(monkeypatch):
     async def mock_create(**kwargs):
+        api_key = kwargs.get('api_key', '')
+        if api_key == "sk-test-key-for-testing-only":
+            raise ValueError("Invalid API key")
+            
         messages = kwargs.get('messages', [])
         if not messages:
             raise ValueError("No messages provided")

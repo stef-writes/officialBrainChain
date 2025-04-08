@@ -4,10 +4,12 @@ Script chain functionality tests with complex scenarios
 
 import pytest
 import asyncio
-from app.nodes.ai_nodes import TextGenerationNode
-from app.models.config import LLMConfig
+from typing import Dict, Any
 from app.chains.script_chain import ScriptChain
+from app.models.node_models import NodeConfig, NodeMetadata
 from app.utils.context import ContextManager
+from app.nodes.text_generation import TextGenerationNode
+from app.models.config import LLMConfig
 
 @pytest.mark.asyncio
 async def test_chain_execution_order(mock_openai):
@@ -56,7 +58,7 @@ async def test_chain_execution_order(mock_openai):
     assert isinstance(result.output, str)  # Output is a string representation of the results
     assert node1.node_id in result.output
     assert "API key" in result.error  # Check for the authentication error
-    assert result.metadata.error_type == "ExecutionError"
+    assert result.metadata.error_type == "AuthenticationError"
     assert result.duration > 0
 
 @pytest.mark.asyncio
@@ -96,7 +98,7 @@ async def test_chain_error_handling(mock_openai):
     assert isinstance(result.output, str)  # Output is a string representation of the results
     assert node1.node_id in result.output
     assert "API key" in result.error  # Check for the authentication error
-    assert result.metadata.error_type == "ExecutionError"
+    assert result.metadata.error_type == "AuthenticationError"
     assert result.duration > 0
 
 @pytest.mark.asyncio
@@ -144,7 +146,7 @@ async def test_chain_context_persistence(mock_openai):
     assert isinstance(result.output, str)  # Output is a string representation of the results
     assert node1.node_id in result.output
     assert "API key" in result.error  # Check for the authentication error
-    assert result.metadata.error_type == "ExecutionError"
+    assert result.metadata.error_type == "AuthenticationError"
     assert result.duration > 0
     
     # Verify context was passed correctly
@@ -221,5 +223,5 @@ async def test_chain_concurrent_execution(mock_openai):
         assert not result.success
         assert isinstance(result.output, str)  # Output is a string representation of the results
         assert "API key" in result.error  # Check for the authentication error
-        assert result.metadata.error_type == "ExecutionError"
+        assert result.metadata.error_type == "AuthenticationError"
         assert result.duration > 0 
