@@ -130,7 +130,19 @@ class ScriptChain:
             
         # If no cycles, add the node and its edges
         self.nodes[node.id] = node
-        self.node_registry[node.id] = node  # Add to both dictionaries
+        
+        # Create proper node instance based on type
+        if node.type == "llm":
+            node_instance = TextGenerationNode(
+                config=node,
+                context_manager=self.context
+            )
+        else:
+            node_instance = BaseNode(
+                config=node
+            )
+            
+        self.node_registry[node.id] = node_instance
         self.graph.add_node(node.id)
         for dep in node.dependencies:
             self.graph.add_edge(dep, node.id)
@@ -170,7 +182,8 @@ class ScriptChain:
         
         def has_cycle(node_id: str) -> bool:
             if node_id in path:
-                return True
+                cycle_path = " -> ".join(list(path) + [node_id])
+                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_path}")
             if node_id in visited:
                 return False
             
@@ -187,8 +200,7 @@ class ScriptChain:
         # Check each node for cycles
         for node_id in self.nodes:
             if has_cycle(node_id):
-                cycle_path = " -> ".join(path)
-                raise ValueError(f"Cyclic dependency detected: {cycle_path}")
+                return False
         
         # Check for orphan nodes
         orphans = []
@@ -247,7 +259,7 @@ class ScriptChain:
             
         return levels
 
-    async def execute(self) -> Dict[str, NodeExecutionResult]:
+    async def execute(self) -> NodeExecutionResult:
         """Execute workflow with level-based parallel processing"""
         self.validate_workflow()
         execution_levels = self._calculate_execution_levels()
@@ -275,13 +287,47 @@ class ScriptChain:
                 results.update(level_results)
                 
                 if any(not r.success for r in level_results.values()):
-                    return await self._handle_execution_failure(level, results)
+                    failed_nodes = [(nid, r) for nid, r in level_results.items() if not r.success]
+                    error_message = failed_nodes[0][1].error if failed_nodes else f"Execution failed at level {level.level}"
+                    return NodeExecutionResult(
+                        success=False,
+                        error=error_message,
+                        output=results,
+                        metadata=NodeMetadata(
+                            node_id=self.chain_id,
+                            node_type="chain",
+                            start_time=self.metrics['start_time'],
+                            end_time=datetime.utcnow(),
+                            error_type="LevelExecutionError"
+                        )
+                    )
                 
-            return await self._handle_execution_success(results)
+            return NodeExecutionResult(
+                success=True,
+                output=results,
+                metadata=NodeMetadata(
+                    node_id=self.chain_id,
+                    node_type="chain",
+                    start_time=self.metrics['start_time'],
+                    end_time=datetime.utcnow()
+                )
+            )
             
         except Exception as e:
             logger.error(f"Critical chain failure: {traceback.format_exc()}")
-            return await self._handle_critical_failure(e)
+            return NodeExecutionResult(
+                success=False,
+                error=str(e),
+                output=results,
+                metadata=NodeMetadata(
+                    node_id=self.chain_id,
+                    node_type="chain",
+                    start_time=self.metrics['start_time'],
+                    end_time=datetime.utcnow(),
+                    error_type=e.__class__.__name__,
+                    error_traceback=traceback.format_exc()
+                )
+            )
 
     async def _process_level(self, level: ExecutionLevel) -> Dict[str, NodeExecutionResult]:
         """Process all nodes in a level with controlled concurrency"""
@@ -366,63 +412,6 @@ class ScriptChain:
         tasks = [process_node(node_id) for node_id in level.node_ids]
         results = await asyncio.gather(*tasks)
         return dict(results)
-
-    async def _handle_execution_success(self, results: Dict[str, NodeExecutionResult]) -> Dict[str, NodeExecutionResult]:
-        """Handle successful chain execution"""
-        end_time = datetime.utcnow()
-        success_result = NodeExecutionResult(
-            success=True,
-            output=results,
-            metadata=NodeMetadata(
-                node_id=self.chain_id,
-                node_type="chain",
-                start_time=self.metrics['start_time'],
-                end_time=end_time
-            )
-        )
-        await self._trigger_callbacks('chain_end', success_result)
-        return success_result
-
-    async def _handle_execution_failure(self, level: ExecutionLevel, results: Dict[str, NodeExecutionResult]) -> Dict[str, NodeExecutionResult]:
-        """Handle level execution failure"""
-        end_time = datetime.utcnow()
-        failed_nodes = [(nid, r) for nid, r in results.items() if not r.success]
-        error_message = failed_nodes[0][1].error if failed_nodes else f"Execution failed at level {level.level}"
-        
-        failure_result = NodeExecutionResult(
-            success=False,
-            error=error_message,
-            output=results,
-            metadata=NodeMetadata(
-                node_id=self.chain_id,
-                node_type="chain",
-                start_time=self.metrics['start_time'],
-                end_time=end_time,
-                error_type="LevelExecutionError",
-                error_traceback=f"Failed nodes at level {level.level}: {[nid for nid, r in failed_nodes]}"
-            )
-        )
-        await self._trigger_callbacks('chain_end', failure_result)
-        return failure_result
-
-    async def _handle_critical_failure(self, error: Exception) -> Dict[str, NodeExecutionResult]:
-        """Handle critical chain failure"""
-        end_time = datetime.utcnow()
-        failure_result = NodeExecutionResult(
-            success=False,
-            error=str(error),
-            output=None,
-            metadata=NodeMetadata(
-                node_id=self.chain_id,
-                node_type="chain",
-                start_time=self.metrics['start_time'],
-                end_time=end_time,
-                error_type=error.__class__.__name__,
-                error_traceback=traceback.format_exc()
-            )
-        )
-        await self._trigger_callbacks('chain_end', failure_result)
-        return failure_result
 
     def _update_metrics(self, node_id: str, result: NodeExecutionResult) -> None:
         """Update chain metrics with node execution results"""
