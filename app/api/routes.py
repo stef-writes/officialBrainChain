@@ -9,7 +9,7 @@ from app.models.node_models import NodeConfig, NodeExecutionResult
 from app.models.config import LLMConfig, MessageTemplate
 from app.nodes.text_generation import TextGenerationNode
 from app.chains.script_chain import ScriptChain
-from app.utils.context import ContextManager
+from app.utils.context import GraphContextManager
 
 router = APIRouter()
 
@@ -27,7 +27,8 @@ class ChainRequest(BaseModel):
 async def create_text_generation_node(request: NodeRequest):
     """Create and execute a text generation node"""
     try:
-        node = TextGenerationNode(request.config)
+        context_manager = GraphContextManager()
+        node = TextGenerationNode(request.config, context_manager)
         result = await node.execute(request.context or {})
         return result
     except Exception as e:
@@ -37,12 +38,13 @@ async def create_text_generation_node(request: NodeRequest):
 async def execute_chain(request: ChainRequest):
     """Execute a chain of nodes"""
     try:
-        chain = ScriptChain()
+        context_manager = GraphContextManager()
+        chain = ScriptChain(context_manager=context_manager)
         
         # Add nodes to chain
         for node_config in request.nodes:
             if node_config.metadata.node_type == "ai":
-                node = TextGenerationNode(node_config)
+                node = TextGenerationNode(node_config, context_manager)
                 chain.add_node(node)
             else:
                 raise HTTPException(
@@ -60,7 +62,7 @@ async def execute_chain(request: ChainRequest):
 async def get_node_context(node_id: str):
     """Get context for a specific node"""
     try:
-        context_manager = ContextManager()
+        context_manager = GraphContextManager()
         context = context_manager.get_context(node_id)
         if context is None:
             raise HTTPException(status_code=404, detail=f"Context not found for node {node_id}")
@@ -72,8 +74,8 @@ async def get_node_context(node_id: str):
 async def clear_node_context(node_id: str):
     """Clear context for a specific node"""
     try:
-        context_manager = ContextManager()
-        context_manager.clear_context(node_id)
+        context_manager = GraphContextManager()
+        context_manager.set_context(node_id, {})  # Clear context by setting empty dict
         return {"message": f"Context cleared for node {node_id}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

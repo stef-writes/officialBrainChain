@@ -8,10 +8,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
-from app.utils.logging import setup_logging
+from app.utils.logging import setup_logger
 
 # Setup logging
-setup_logging()
+logger = setup_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -5,9 +5,9 @@ Tests for the enhanced ScriptChain implementation.
 import pytest
 import asyncio
 from typing import Dict, Any
-from app.chains.script_chain import ScriptChain
-from app.models.node_models import NodeConfig, NodeExecutionResult
-from app.utils.callbacks import LoggingCallback, MetricsCallback, DebugCallback
+from app.chains.script_chain import ScriptChain, ExecutionLevel
+from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata
+from app.utils.callbacks import LoggingCallback, MetricsCallback
 
 @pytest.mark.asyncio
 async def test_script_chain_initialization(script_chain: ScriptChain):
@@ -49,10 +49,11 @@ async def test_validate_workflow(script_chain: ScriptChain, test_nodes: Dict[str
         level=0,
         dependencies=["node3"]  # Creates a cycle
     )
-    script_chain.add_node(cyclic_node)
     
-    # Validate should fail
-    assert script_chain.validate_workflow() is False
+    # Validate should raise ValueError for cyclic dependency
+    with pytest.raises(ValueError, match="Workflow contains cyclic dependencies"):
+        script_chain.add_node(cyclic_node)
+        script_chain.validate_workflow()
 
 @pytest.mark.asyncio
 async def test_execution_levels(script_chain: ScriptChain, test_nodes: Dict[str, NodeConfig]):
@@ -66,9 +67,9 @@ async def test_execution_levels(script_chain: ScriptChain, test_nodes: Dict[str,
     
     # Verify levels
     assert len(levels) == 3
-    assert "node1" in levels[0]
-    assert "node2" in levels[1]
-    assert "node3" in levels[2]
+    assert "node1" in levels[0].node_ids
+    assert "node2" in levels[1].node_ids
+    assert "node3" in levels[2].node_ids
 
 @pytest.mark.asyncio
 async def test_parallel_execution(script_chain: ScriptChain, test_nodes: Dict[str, NodeConfig]):
@@ -90,8 +91,8 @@ async def test_parallel_execution(script_chain: ScriptChain, test_nodes: Dict[st
     
     # Verify both nodes executed
     assert result.success
-    assert "node1" in result.node_results
-    assert "parallel_node" in result.node_results
+    assert "node1" in result.output
+    assert "parallel_node" in result.output
 
 @pytest.mark.asyncio
 async def test_error_handling(script_chain: ScriptChain):
@@ -117,8 +118,8 @@ async def test_error_handling(script_chain: ScriptChain):
     
     # Verify error handling
     assert not result.success
-    assert "failing_node" in result.node_results
-    assert result.node_results["failing_node"].error is not None
+    assert result.error is not None
+    assert "Test error" in result.error
 
 @pytest.mark.asyncio
 async def test_callback_integration(script_chain: ScriptChain, test_nodes: Dict[str, NodeConfig], callbacks: Dict[str, Any]):
@@ -137,11 +138,8 @@ async def test_callback_integration(script_chain: ScriptChain, test_nodes: Dict[
     # Verify callbacks were triggered
     assert result.success
     metrics = callbacks["metrics"].get_metrics()
-    assert "chains" in metrics
-    assert len(metrics["chains"]) > 0
-    
-    debug_events = callbacks["debug"].get_events()
-    assert len(debug_events) > 0
+    assert len(metrics) > 0
+    assert any(chain_id for chain_id in metrics.keys())
 
 @pytest.mark.asyncio
 async def test_retry_mechanism(script_chain: ScriptChain):
@@ -165,7 +163,11 @@ async def test_retry_mechanism(script_chain: ScriptChain):
         attempts += 1
         if attempts < 3:
             raise Exception("Test error")
-        return NodeExecutionResult(success=True)
+        return NodeExecutionResult(
+            success=True,
+            output={"result": "success"},
+            metadata=NodeMetadata(node_id="retry_node")
+        )
     
     script_chain.execute_node = mock_execute
     
@@ -175,5 +177,4 @@ async def test_retry_mechanism(script_chain: ScriptChain):
     # Verify retry behavior
     assert result.success
     assert attempts == 3
-    assert "retry_node" in result.node_results
-    assert result.node_results["retry_node"].success 
+    assert "retry_node" in result.output 

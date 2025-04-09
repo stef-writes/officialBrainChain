@@ -3,7 +3,7 @@ Data models for node configurations and metadata
 """
 
 from typing import Dict, List, Optional, Union, Any
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, validator
 from datetime import datetime
 from .config import LLMConfig, MessageTemplate  # Import MessageTemplate
 
@@ -19,46 +19,59 @@ class NodeMetadata(BaseModel):
     modified_at: datetime = Field(default_factory=datetime.utcnow,
                                 description="Last modification timestamp")
     description: Optional[str] = Field(None, description="Description of the node")
-    error_type: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    error_type: Optional[str] = Field(None, description="Type of error if execution failed")
+    timestamp: datetime = Field(default_factory=datetime.utcnow,
+                               description="Execution timestamp")
+    start_time: Optional[datetime] = Field(None, description="Execution start time")
+    end_time: Optional[datetime] = Field(None, description="Execution end time")
+    duration: Optional[float] = Field(None, description="Execution duration in seconds")
 
     @model_validator(mode='before')
     @classmethod
     def set_modified_at(cls, values):
+        """Update modified_at timestamp on any change."""
         values['modified_at'] = datetime.utcnow()
         return values
 
 class NodeConfig(BaseModel):
-    """Complete node configuration model"""
-    metadata: NodeMetadata
-    llm_config: LLMConfig
-    input_schema: Dict[str, str] = Field(default_factory=dict,
-                                       description="Expected input parameters and types")
-    output_schema: Dict[str, str] = Field(default_factory=dict,
-                                        description="Produced output parameters and types")
-    dependencies: List[str] = Field(default_factory=list,
-                                  description="Node IDs this node depends on")
-    timeout: int = Field(30, gt=0, description="Maximum execution time in seconds")
-    templates: List[MessageTemplate] = Field(default_factory=list,
-                                           description="Message templates for node execution")
-    
+    """Configuration for a node in the workflow."""
+    id: str = Field(..., description="Unique identifier for the node")
+    type: str = Field(..., description="Type of node (e.g., 'llm', 'logic', 'data')")
+    model: str = Field(..., description="Model to use for the node")
+    prompt: str = Field(..., description="Prompt template for the node")
+    level: int = Field(default=0, description="Execution level for parallel processing")
+    dependencies: List[str] = Field(default_factory=list, description="List of node IDs this node depends on")
+    timeout: Optional[float] = Field(None, description="Optional timeout in seconds")
+    templates: Dict[str, Any] = Field(default_factory=dict, description="Message templates for the node")
+    llm_config: Optional[LLMConfig] = Field(None, description="LLM configuration for the node")
+    metadata: Optional[NodeMetadata] = None
+
     @field_validator('dependencies')
     @classmethod
-    def check_self_reference(cls, v, info):
-        if 'metadata' in info.data and info.data['metadata'].node_id in v:
-            raise ValueError("Node cannot depend on itself")
+    def validate_dependencies(cls, v: List[str], info) -> List[str]:
+        """Validate that a node doesn't depend on itself."""
+        node_id = info.data.get('id')
+        if node_id and node_id in v:
+            raise ValueError(f"Node {node_id} cannot depend on itself")
         return v
-
-    model_config = ConfigDict(extra="forbid")  # Prevent unexpected arguments
 
     def __init__(self, **data):
         super().__init__(**data)
+        if self.metadata is None:
+            self.metadata = NodeMetadata(
+                node_id=self.id,
+                node_type=self.type,
+                version="1.0.0",
+                description=f"Node {self.id} of type {self.type}"
+            )
         # Check model compatibility for all templates
-        if 'templates' in data and 'llm_config' in data:
-            model = data['llm_config'].model
-            for template in self.templates:
+        if 'templates' in data and 'model' in data:
+            model = data['model']
+            for template in self.templates.values():
                 if not template.is_compatible_with_model(model):
                     raise ValueError(f"Model {model} is too old for template requiring {template.min_model_version}")
+
+    model_config = ConfigDict(extra="forbid")  # Prevent unexpected arguments
 
 class NodeExecutionRecord(BaseModel):
     """Execution statistics and historical data"""
@@ -72,51 +85,30 @@ class NodeExecutionRecord(BaseModel):
                                       description="Token usage by model version")
 
 class NodeIO(BaseModel):
-    """Input/Output validation model"""
-    inputs: Dict[str, Union[str, int, float, bool, Dict, List]] 
-    outputs: Dict[str, Union[str, int, float, bool, Dict, List]] = Field(default_factory=dict)
-    context: Dict[str, Union[str, Dict]] = Field(default_factory=dict,
-                                              description="Execution context metadata")
+    """Input/Output schema for a node."""
+    schema: Dict[str, Any] = Field(default_factory=dict)
+    required: List[str] = Field(default_factory=list)
 
 class UsageMetadata(BaseModel):
-    """Metadata for tracking resource usage during node execution"""
-    prompt_tokens: Optional[int] = Field(default=0, description="Number of tokens in the prompt")
-    completion_tokens: Optional[int] = Field(default=0, description="Number of tokens in the completion")
-    total_tokens: Optional[int] = Field(default=0, description="Total number of tokens used")
-    api_calls: Optional[int] = Field(default=0, description="Number of API calls made")
-    model: Optional[str] = None
-    node_id: Optional[str] = Field(default=None, description="ID of the node that generated this usage")
-    model_config = ConfigDict(extra="allow")
+    """Usage metadata for a node execution."""
+    prompt_tokens: int = Field(default=0, description="Number of tokens in the prompt")
+    completion_tokens: int = Field(default=0, description="Number of tokens in the completion")
+    total_tokens: int = Field(default=0, description="Total number of tokens used")
+    cost: float = Field(default=0.0, description="Cost of the API call in USD")
+    api_calls: int = Field(default=1, description="Number of API calls made")
+    model: str = Field(..., description="Model used for the execution")
+    node_id: str = Field(..., description="ID of the node that generated this usage")
 
 class NodeExecutionResult(BaseModel):
-    """Result model for node execution"""
-    success: bool = False
-    output: Optional[Union[str, Dict[str, Any]]] = None  # Allow both string and dict outputs
-    error: Optional[str] = None
-    metadata: NodeMetadata
-    duration: float = Field(default=0.0, ge=0.0, description="Execution duration in seconds")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    usage: Optional[UsageMetadata] = None  # Add usage metadata field
+    """Result of a node execution."""
+    success: bool = Field(default=True, description="Whether the execution was successful")
+    error: Optional[str] = Field(None, description="Error message if execution failed")
+    output: Optional[Dict[str, Any]] = Field(None, description="Output data from the node")
+    metadata: NodeMetadata = Field(..., description="Metadata about the execution")
+    usage: Optional[UsageMetadata] = Field(None, description="Usage statistics from the execution")
 
-    def __init__(self, **data):
-        # Handle case where metadata is passed as a dict
-        if "metadata" in data and isinstance(data["metadata"], dict):
-            metadata_dict = data["metadata"]
-            # Ensure required fields are present
-            if "node_id" not in metadata_dict or "node_type" not in metadata_dict:
-                raise ValueError("metadata must contain node_id and node_type")
-            data["metadata"] = NodeMetadata(**metadata_dict)
-        
-        # Handle usage metadata if present
-        if "usage" in data and isinstance(data["usage"], dict):
-            data["usage"] = UsageMetadata(**data["usage"])
-        
-        super().__init__(**data)
-
-    # Updated Pydantic V2 config with serialization
-    model_config = ConfigDict(
-        extra="allow",
-        json_schema_serialization_defaults={
-            datetime: lambda v: v.isoformat()
+    class Config:
+        arbitrary_types_allowed = True
+        json_encoders = {
+            datetime: str
         }
-    )

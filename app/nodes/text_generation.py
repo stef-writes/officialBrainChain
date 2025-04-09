@@ -19,7 +19,7 @@ from app.models.node_models import (
     UsageMetadata
 )
 from app.models.config import LLMConfig, MessageTemplate
-from app.utils.context import ContextManager
+from app.utils.context import GraphContextManager
 from app.utils.retry import AsyncRetry
 from app.nodes.base import BaseNode
 from app.utils.logging import logger
@@ -88,17 +88,18 @@ class TextGenerationNode(BaseNode):
     # Shared client pool for all instances
     _client_pool = {}
     
-    def __init__(self, config: NodeConfig, context_manager: ContextManager):
-        """Initialize the text generation node.
+    def __init__(self, config: NodeConfig, context_manager: GraphContextManager):
+        """Initialize the node with configuration and context manager.
         
         Args:
             config: Node configuration
-            context_manager: Context manager for handling context
+            context_manager: Context manager for handling node context
         """
         super().__init__(config)
+        self.context_manager = context_manager
+        self._client = None
         self.llm_config = config.llm_config
         self.templates = config.templates
-        self.context_manager = context_manager  # Use the provided context manager
     
     @property
     def client(self) -> AsyncOpenAI:

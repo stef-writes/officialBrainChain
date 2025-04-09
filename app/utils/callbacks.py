@@ -11,231 +11,241 @@ For debugging purposes, see debug_callback.py which provides the DebugCallback c
 with more detailed event tracking and analysis capabilities.
 """
 
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
-import logging
 import json
 import time
-from datetime import datetime
-from app.models.node_models import NodeConfig, NodeExecutionResult, UsageMetadata
-
-logger = logging.getLogger(__name__)
+import logging
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional
+from app.utils.logging import logger
 
 class ScriptChainCallback(ABC):
-    """Abstract base class for ScriptChain callback handlers.
-    
-    This class defines the interface for callback handlers that can be registered
-    with a ScriptChain to receive notifications about execution events.
-    
-    For basic logging, use LoggingCallback.
-    For metrics collection, use MetricsCallback.
-    For detailed debugging, use DebugCallback from debug_callback.py.
-    """
+    """Abstract base class for ScriptChain callbacks"""
     
     @abstractmethod
-    async def on_chain_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        """Called when a chain execution starts."""
+    def on_chain_start(self, chain_id: str, inputs: Dict[str, Any]) -> None:
+        """Called when chain execution starts.
+        
+        Args:
+            chain_id: Unique identifier for the chain
+            inputs: Input parameters for the chain
+        """
         pass
-    
+        
     @abstractmethod
-    async def on_chain_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        """Called when a chain execution ends."""
-        pass
-    
-    @abstractmethod
-    async def on_node_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        """Called when a node execution starts."""
-        pass
-    
-    @abstractmethod
-    async def on_node_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        """Called when a node execution ends successfully."""
-        pass
-    
-    @abstractmethod
-    async def on_node_error(self, chain_id: str, data: Dict[str, Any]) -> None:
-        """Called when a node execution fails."""
-        pass
-    
-    @abstractmethod
-    async def on_context_update(self, node_id: str, context: Dict[str, Any], metadata: Dict[str, Any]) -> None:
-        """Called when a node's context is updated."""
-        pass
-    
-    @abstractmethod
-    async def on_vector_store_op(self,
-        operation: str,  # "store" or "retrieve"
-        node_id: str,
-        context_snippet: str,
-        similarity_score: Optional[float] = None
+    def on_chain_end(
+        self,
+        chain_id: str,
+        outputs: Dict[str, Any],
+        error: Optional[Exception] = None
     ) -> None:
-        """Called when a vector store operation occurs."""
+        """Called when chain execution ends.
+        
+        Args:
+            chain_id: Unique identifier for the chain
+            outputs: Output results from the chain
+            error: Optional error if execution failed
+        """
+        pass
+        
+    @abstractmethod
+    def on_node_start(
+        self,
+        chain_id: str,
+        node_id: str,
+        inputs: Dict[str, Any]
+    ) -> None:
+        """Called when node execution starts.
+        
+        Args:
+            chain_id: Unique identifier for the chain
+            node_id: Unique identifier for the node
+            inputs: Input parameters for the node
+        """
+        pass
+        
+    @abstractmethod
+    def on_node_end(
+        self,
+        chain_id: str,
+        node_id: str,
+        outputs: Dict[str, Any]
+    ) -> None:
+        """Called when node execution ends successfully.
+        
+        Args:
+            chain_id: Unique identifier for the chain
+            node_id: Unique identifier for the node
+            outputs: Output results from the node
+        """
+        pass
+        
+    @abstractmethod
+    def on_node_error(
+        self,
+        chain_id: str,
+        node_id: str,
+        error: Exception
+    ) -> None:
+        """Called when node execution fails.
+        
+        Args:
+            chain_id: Unique identifier for the chain
+            node_id: Unique identifier for the node
+            error: Exception that caused the failure
+        """
         pass
 
 class LoggingCallback(ScriptChainCallback):
-    """Callback handler that logs chain and node events.
-    
-    This is the primary callback for production use, providing essential
-    logging of workflow execution events at configurable log levels.
-    """
+    """Callback handler that logs execution events"""
     
     def __init__(self, log_level: int = logging.INFO):
-        self.logger = logging.getLogger(__name__)
-        self.log_level = log_level
-    
-    async def on_chain_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        self.logger.log(
-            self.log_level,
-            f"Chain {chain_id} started with {data.get('total_nodes', 0)} nodes"
-        )
-    
-    async def on_chain_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        success = data.get('success', False)
-        duration = data.get('duration', 0)
+        """Initialize logging callback.
         
-        if success:
-            self.logger.log(
+        Args:
+            log_level: Logging level to use
+        """
+        self.log_level = log_level
+        
+    def on_chain_start(self, chain_id: str, inputs: Dict[str, Any]) -> None:
+        logger.log(
+            self.log_level,
+            f"Starting chain execution: {chain_id}"
+        )
+        
+    def on_chain_end(
+        self,
+        chain_id: str,
+        outputs: Dict[str, Any],
+        error: Optional[Exception] = None
+    ) -> None:
+        if error:
+            logger.log(
                 self.log_level,
-                f"Chain {chain_id} completed successfully in {duration:.2f} seconds"
+                f"Chain execution failed: {chain_id}, Error: {str(error)}"
             )
         else:
-            error = data.get('error', 'Unknown error')
-            self.logger.log(
-                logging.ERROR,
-                f"Chain {chain_id} failed after {duration:.2f} seconds: {error}"
+            logger.log(
+                self.log_level,
+                f"Chain execution completed: {chain_id}"
             )
-    
-    async def on_node_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        self.logger.log(
-            self.log_level,
-            f"Node {node_id} in chain {chain_id} started execution"
-        )
-    
-    async def on_node_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        level = data.get('level', 'unknown')
-        self.logger.log(
-            self.log_level,
-            f"Node {node_id} in chain {chain_id} (level {level}) completed successfully"
-        )
-    
-    async def on_node_error(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        error = data.get('error', {}).get('error', 'Unknown error')
-        level = data.get('level', 'unknown')
-        self.logger.log(
-            logging.ERROR,
-            f"Node {node_id} in chain {chain_id} (level {level}) failed: {error}"
-        )
-
-    async def on_context_update(self, node_id: str, context: Dict[str, Any], metadata: Dict[str, Any]) -> None:
-        self.logger.log(
-            self.log_level,
-            f"Context updated for node {node_id} with metadata: {metadata}"
-        )
-
-    async def on_vector_store_op(self,
-        operation: str,
+            
+    def on_node_start(
+        self,
+        chain_id: str,
         node_id: str,
-        context_snippet: str,
-        similarity_score: Optional[float] = None
+        inputs: Dict[str, Any]
     ) -> None:
-        msg = f"Vector store {operation} for node {node_id}"
-        if similarity_score is not None:
-            msg += f" with similarity score {similarity_score:.3f}"
-        self.logger.log(self.log_level, msg)
+        logger.log(
+            self.log_level,
+            f"Starting node execution: {chain_id}/{node_id}"
+        )
+        
+    def on_node_end(
+        self,
+        chain_id: str,
+        node_id: str,
+        outputs: Dict[str, Any]
+    ) -> None:
+        logger.log(
+            self.log_level,
+            f"Node execution completed: {chain_id}/{node_id}"
+        )
+        
+    def on_node_error(
+        self,
+        chain_id: str,
+        node_id: str,
+        error: Exception
+    ) -> None:
+        logger.log(
+            self.log_level,
+            f"Node execution failed: {chain_id}/{node_id}, Error: {str(error)}"
+        )
 
 class MetricsCallback(ScriptChainCallback):
-    """Callback handler that collects execution metrics.
-    
-    This callback focuses on collecting performance metrics, timing data,
-    and usage statistics for analysis and optimization.
-    """
+    """Callback handler that collects execution metrics"""
     
     def __init__(self):
-        self.metrics = {
-            'chains': {},
-            'nodes': {},
-            'vector_ops': [],
-            'context_updates': []
+        """Initialize metrics callback"""
+        self.metrics: Dict[str, Dict[str, Any]] = {}
+        
+    def on_chain_start(self, chain_id: str, inputs: Dict[str, Any]) -> None:
+        self.metrics[chain_id] = {
+            "start_time": time.time(),
+            "inputs": inputs,
+            "nodes": {}
         }
-    
-    async def on_chain_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        self.metrics['chains'][chain_id] = {
-            'start_time': time.time(),
-            'node_count': data.get('total_nodes', 0),
-            'execution_levels': len(data.get('execution_levels', [])),
-            'nodes': {}
-        }
-    
-    async def on_chain_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        if chain_id in self.metrics['chains']:
-            chain_metrics = self.metrics['chains'][chain_id]
-            chain_metrics['end_time'] = time.time()
-            chain_metrics['duration'] = chain_metrics['end_time'] - chain_metrics['start_time']
-            chain_metrics['success'] = data.get('success', False)
-            
-            if not chain_metrics['success']:
-                chain_metrics['error'] = data.get('error', 'Unknown error')
-    
-    async def on_node_start(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        if chain_id in self.metrics['chains']:
-            self.metrics['chains'][chain_id]['nodes'][node_id] = {
-                'start_time': time.time(),
-                'level': data.get('level', 'unknown')
-            }
-    
-    async def on_node_end(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        if chain_id in self.metrics['chains'] and node_id in self.metrics['chains'][chain_id]['nodes']:
-            node_metrics = self.metrics['chains'][chain_id]['nodes'][node_id]
-            node_metrics['end_time'] = time.time()
-            node_metrics['duration'] = node_metrics['end_time'] - node_metrics['start_time']
-            node_metrics['success'] = True
-            
-            if 'result' in data and 'usage' in data['result']:
-                node_metrics['usage'] = data['result']['usage']
-    
-    async def on_node_error(self, chain_id: str, data: Dict[str, Any]) -> None:
-        node_id = data.get('node_id', 'unknown')
-        if chain_id in self.metrics['chains'] and node_id in self.metrics['chains'][chain_id]['nodes']:
-            node_metrics = self.metrics['chains'][chain_id]['nodes'][node_id]
-            node_metrics['end_time'] = time.time()
-            node_metrics['duration'] = node_metrics['end_time'] - node_metrics['start_time']
-            node_metrics['success'] = False
-            node_metrics['error'] = data.get('error', {}).get('error', 'Unknown error')
-
-    async def on_context_update(self, node_id: str, context: Dict[str, Any], metadata: Dict[str, Any]) -> None:
-        self.metrics['context_updates'].append({
-            'node_id': node_id,
-            'timestamp': datetime.utcnow().isoformat(),
-            'context_size': len(str(context)),
-            'metadata': metadata
-        })
-
-    async def on_vector_store_op(self,
-        operation: str,
-        node_id: str,
-        context_snippet: str,
-        similarity_score: Optional[float] = None
+        
+    def on_chain_end(
+        self,
+        chain_id: str,
+        outputs: Dict[str, Any],
+        error: Optional[Exception] = None
     ) -> None:
-        self.metrics['vector_ops'].append({
-            'operation': operation,
-            'node_id': node_id,
-            'timestamp': datetime.utcnow().isoformat(),
-            'similarity_score': similarity_score
-        })
-    
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get the collected metrics."""
+        if chain_id in self.metrics:
+            self.metrics[chain_id].update({
+                "end_time": time.time(),
+                "duration": time.time() - self.metrics[chain_id]["start_time"],
+                "outputs": outputs,
+                "error": str(error) if error else None,
+                "success": error is None
+            })
+            
+    def on_node_start(
+        self,
+        chain_id: str,
+        node_id: str,
+        inputs: Dict[str, Any]
+    ) -> None:
+        if chain_id in self.metrics:
+            self.metrics[chain_id]["nodes"][node_id] = {
+                "start_time": time.time(),
+                "inputs": inputs
+            }
+            
+    def on_node_end(
+        self,
+        chain_id: str,
+        node_id: str,
+        outputs: Dict[str, Any]
+    ) -> None:
+        if chain_id in self.metrics and node_id in self.metrics[chain_id]["nodes"]:
+            node_metrics = self.metrics[chain_id]["nodes"][node_id]
+            node_metrics.update({
+                "end_time": time.time(),
+                "duration": time.time() - node_metrics["start_time"],
+                "outputs": outputs,
+                "success": True
+            })
+            
+    def on_node_error(
+        self,
+        chain_id: str,
+        node_id: str,
+        error: Exception
+    ) -> None:
+        if chain_id in self.metrics and node_id in self.metrics[chain_id]["nodes"]:
+            node_metrics = self.metrics[chain_id]["nodes"][node_id]
+            node_metrics.update({
+                "end_time": time.time(),
+                "duration": time.time() - node_metrics["start_time"],
+                "error": str(error),
+                "success": False
+            })
+            
+    def get_metrics(self) -> Dict[str, Dict[str, Any]]:
+        """Get all collected metrics.
+        
+        Returns:
+            Dictionary containing all chain and node metrics
+        """
         return self.metrics
-    
+            
     def export_metrics(self, filepath: str) -> None:
-        """Export metrics to a JSON file."""
-        try:
-            with open(filepath, 'w') as f:
-                json.dump(self.metrics, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to export metrics: {e}") 
+        """Export collected metrics to a JSON file.
+        
+        Args:
+            filepath: Path to save metrics file
+        """
+        with open(filepath, "w") as f:
+            json.dump(self.metrics, f, indent=2) 

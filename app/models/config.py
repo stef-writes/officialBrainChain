@@ -6,7 +6,6 @@ import re
 from typing import Optional
 from packaging import version
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from app.utils.logging import logger
 
 def parse_model_version(model_name: str) -> str:
     """Convert model name to semantic version string.
@@ -18,7 +17,7 @@ def parse_model_version(model_name: str) -> str:
         Semantic version string (e.g., '4.0.0', '4.1.0')
         
     Raises:
-        ValueError: If model name is not supported
+        ValueError: If model name cannot be parsed
     """
     if model_name == "gpt-4":
         return "4.0.0"
@@ -43,7 +42,7 @@ class MessageTemplate(BaseModel):
             return self.content.format(**kwargs)
         except KeyError as e:
             # Return unformatted content if formatting fails
-            logger.warning(f"Missing template key {e}, using unformatted content")
+            print(f"Warning: Missing template key {e}, using unformatted content")
             return self.content
 
     model_config = ConfigDict(extra="forbid")
@@ -101,48 +100,24 @@ class MessageTemplate(BaseModel):
             raise ValueError(f"Model {data.get('min_model_version')} is too old for this template")
 
 class LLMConfig(BaseModel):
-    """Configuration for language model parameters"""
-    model: str = Field("gpt-4", description="Model identifier")
-    api_key: str = Field(..., description="API key for model access")
-    temperature: float = Field(0.7, ge=0, le=1, description="Sampling temperature")
-    max_tokens: int = Field(1000, gt=0, description="Maximum tokens to generate")
-    top_p: float = Field(1.0, ge=0, le=1, description="Nucleus sampling parameter")
-    frequency_penalty: float = Field(0.0, ge=-2, le=2, 
-                                   description="Frequency penalty parameter")
-    presence_penalty: float = Field(0.0, ge=-2, le=2,
-                                  description="Presence penalty parameter")
-
-    model_config = ConfigDict(extra="forbid")
-
-    @field_validator('model')
-    @classmethod
-    def validate_model(cls, v: str) -> str:
-        """Validate model identifier"""
-        valid_models = [
-            'gpt-4',
-            'gpt-4-turbo',
-            'gpt-4-32k'
-        ]
-        if v not in valid_models:
-            raise ValueError(f"Unsupported model. Valid options: {', '.join(valid_models)}")
-        return v
+    """Configuration for language models"""
+    model: str = Field(..., description="Model identifier (e.g., gpt-4)")
+    temperature: float = Field(0.7, ge=0.0, le=1.0, description="Sampling temperature")
+    max_tokens: int = Field(500, gt=0, description="Maximum tokens to generate")
+    max_context_tokens: int = Field(4000, gt=0, description="Maximum context window size")
+    api_key: str = Field(..., description="API key for the model service")
 
     @field_validator('api_key')
     @classmethod
     def validate_api_key(cls, v: str) -> str:
-        """Validate API key format"""
-        # Allow test API keys that start with 'sk-test-'
-        if v.startswith('sk-test-'):
+        """Validate API key format."""
+        if v.startswith('test-'):  # Allow test keys
             return v
-            
-        # Allow project-specific API keys that start with 'sk-proj-'
-        if v.startswith('sk-proj-'):
-            return v
-            
-        # Validate production API keys
-        if not v.startswith('sk-') or len(v) != 51:
-            raise ValueError("API keys must start with 'sk-' and be 51 characters long, or start with 'sk-proj-' for project-specific keys. Check your OpenAI credentials.")
+        if not (v.startswith('sk-') and len(v) == 51) and not v.startswith('sk-proj-'):
+            raise ValueError("API keys must start with 'sk-' and be 51 characters long, or start with 'sk-proj-' for project-specific keys")
         return v
+
+    model_config = ConfigDict(extra="forbid")
 
 class AppConfig(BaseModel):
     """Application configuration"""

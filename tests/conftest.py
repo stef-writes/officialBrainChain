@@ -8,8 +8,8 @@ import networkx as nx
 from typing import Dict, Any, Generator
 from app.chains.script_chain import ScriptChain
 from app.utils.context import GraphContextManager
-from app.utils.callbacks import LoggingCallback, MetricsCallback, DebugCallback
-from app.models.node_models import NodeConfig
+from app.utils.callbacks import LoggingCallback, MetricsCallback
+from app.models.node_models import NodeConfig, LLMConfig
 from app.context.vector import VectorStore
 
 @pytest.fixture
@@ -60,13 +60,21 @@ def context_manager(test_graph: nx.DiGraph, mock_vector_store: VectorStore) -> G
 @pytest.fixture
 def test_nodes() -> Dict[str, NodeConfig]:
     """Create test node configurations."""
+    llm_config = LLMConfig(
+        model="gpt-4",
+        temperature=0.7,
+        max_tokens=500,
+        max_context_tokens=2000,
+        api_key="test-key"
+    )
     return {
         "node1": NodeConfig(
             id="node1",
             type="llm",
             model="gpt-4",
             prompt="Test prompt 1",
-            level=0
+            level=0,
+            llm_config=llm_config
         ),
         "node2": NodeConfig(
             id="node2",
@@ -74,7 +82,8 @@ def test_nodes() -> Dict[str, NodeConfig]:
             model="gpt-4",
             prompt="Test prompt 2",
             level=1,
-            dependencies=["node1"]
+            dependencies=["node1"],
+            llm_config=llm_config
         ),
         "node3": NodeConfig(
             id="node3",
@@ -82,7 +91,8 @@ def test_nodes() -> Dict[str, NodeConfig]:
             model="gpt-4",
             prompt="Test prompt 3",
             level=2,
-            dependencies=["node2"]
+            dependencies=["node2"],
+            llm_config=llm_config
         )
     }
 
@@ -91,6 +101,5 @@ def callbacks() -> Dict[str, Any]:
     """Create test callback instances."""
     return {
         "logging": LoggingCallback(),
-        "metrics": MetricsCallback(),
-        "debug": DebugCallback()
+        "metrics": MetricsCallback()
     } 
