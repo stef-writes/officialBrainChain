@@ -11,6 +11,9 @@ import logging
 from app.context.vector import VectorStore
 from pathlib import Path
 from app.context.vector import HybridSearchConfig
+from langchain import LangChain
+from langchain.vectorstores import PineconeVectorStore
+import os
 
 if TYPE_CHECKING:
     from app.models.node_models import UsageMetadata
@@ -32,7 +35,9 @@ class ContextManager:
         self.max_context_tokens = max_context_tokens
         self.contexts: Dict[str, Dict[str, Any]] = {}
         self.usage_stats: Dict[str, Dict[str, int]] = {}
-        self.vector_store = VectorStore(config=HybridSearchConfig(alpha=0.65))  # Initialize vector store with hybrid config
+        self.vector_store = PineconeVectorStore(index_name='your-index-name', api_key=os.getenv('PINECONE_API_KEY'))
+        self.lc = LangChain()
+        self.lc.set_vector_store(self.vector_store)
         self._load()
         logger.info(f"Initialized context manager at {storage_path}")
 

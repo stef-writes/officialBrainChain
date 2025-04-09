@@ -12,8 +12,16 @@ import math
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from app.models.embeddings import HybridSearchConfig
+from dotenv import load_dotenv
+import os
+import pinecone
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+pinecone.init(api_key=PINECONE_API_KEY, environment='us-west1-gcp')  # Adjust environment as needed
 
 class VectorStore:
     """Manages vector embeddings and similarity operations"""
@@ -24,14 +32,17 @@ class VectorStore:
     WINDOW_SIZE = 5  # Words per window
     WINDOW_STRIDE = 3  # Words between windows
     
-    def __init__(self, storage_path: str = "vector_store.json", config: Optional[HybridSearchConfig] = None):
+    def __init__(self, index_name: str = 'your-index-name'):
         """Initialize the vector store.
         
         Args:
-            storage_path: Path to store vectors persistently
-            config: Configuration for hybrid search
+            index_name: Name of the Pinecone index
         """
-        self.storage_path = Path(storage_path)
+        self.index_name = index_name
+        if self.index_name not in pinecone.list_indexes():
+            pinecone.create_index(self.index_name, dimension=128)  # Adjust dimension as needed
+        self.index = pinecone.Index(self.index_name)
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')  # Example model
         self.vectors: Dict[str, List[float]] = {}
         self.contexts: Dict[str, Dict[str, Any]] = {}
         self.stemmer = PorterStemmer()
@@ -45,14 +56,8 @@ class VectorStore:
             "might", "must", "can", "could"
         }
         
-        # Initialize configuration
-        self.config = config or HybridSearchConfig()
-        
-        # Initialize sentence transformer for conceptual matching
-        self.conceptual_model = SentenceTransformer(self.config.model_name)
-        
         self._load()
-        logger.info(f"Initialized vector store at {storage_path} with config: {self.config}")
+        logger.info(f"Initialized vector store with index: {self.index_name}")
 
     def _preprocess_text(self, text: str) -> List[str]:
         """Preprocess text by tokenizing, stemming, and removing stop words.
@@ -100,76 +105,30 @@ class VectorStore:
         return scores
 
     def _load(self) -> None:
-        """Load vectors and contexts from storage"""
-        if self.storage_path.exists():
-            try:
-                with open(self.storage_path, 'r') as f:
-                    data = json.load(f)
-                    self.vectors = data.get('vectors', {})
-                    self.contexts = data.get('contexts', {})
-                    self.doc_freq = defaultdict(int, data.get('doc_freq', {}))
-                    self.total_docs = data.get('total_docs', 0)
-                logger.debug(f"Loaded {len(self.vectors)} vectors from {self.storage_path}")
-            except Exception as e:
-                logger.error(f"Error loading vectors: {e}")
-                self.vectors = {}
-                self.contexts = {}
+        """Load vectors and contexts from Pinecone"""
+        try:
+            vectors = self.index.fetch(ids=self.index.list_ids())
+            self.vectors = {f"vector_{i}": vector for i, vector in enumerate(vectors['vectors'])}
+            self.contexts = {f"vector_{i}": {'text': f"vector_{i}", 'metadata': {'node_id': f"vector_{i}"}} for i in range(len(self.vectors))}
+            self.doc_freq = defaultdict(int, {term: freq for vector in self.vectors.values() for term, freq in self._compute_tf_idf(self._preprocess_text(f"vector_{i}"))})
+            self.total_docs = len(self.vectors)
+            logger.debug(f"Loaded {len(self.vectors)} vectors from Pinecone")
+        except Exception as e:
+            logger.error(f"Error loading vectors: {e}")
+            self.vectors = {}
+            self.contexts = {}
 
     def _save(self) -> None:
-        """Save vectors and contexts to storage"""
+        """Save vectors and contexts to Pinecone"""
         try:
-            with open(self.storage_path, 'w') as f:
-                json.dump({
-                    'vectors': self.vectors,
-                    'contexts': self.contexts,
-                    'doc_freq': dict(self.doc_freq),
-                    'total_docs': self.total_docs
-                }, f)
-            logger.debug(f"Saved {len(self.vectors)} vectors to {self.storage_path}")
+            vectors = {f"vector_{i}": vector for i, vector in enumerate(self.vectors.values())}
+            self.index.upsert(vectors)
+            logger.debug(f"Saved {len(self.vectors)} vectors to Pinecone")
         except Exception as e:
             logger.error(f"Error saving vectors: {e}")
 
-    def _store_window(self, text: str, metadata: Dict[str, Any], window_position: int) -> str:
-        """Store a single window of text with its embedding.
-        
-        Args:
-            text: Window text to store
-            metadata: Associated metadata
-            window_position: Position of the window in the original text
-            
-        Returns:
-            ID of the stored window
-        """
-        # Preprocess text and compute TF-IDF
-        terms = self._preprocess_text(text)
-        tf_idf_scores = self._compute_tf_idf(terms)
-        
-        # Update document frequencies
-        for term in set(terms):
-            self.doc_freq[term] += 1
-        self.total_docs += 1
-        
-        # Create vector from TF-IDF scores
-        window_id = f"{metadata.get('node_id', 'unknown')}_window_{window_position}"
-        self.vectors[window_id] = list(tf_idf_scores.values())
-        
-        # Compute conceptual embedding
-        conceptual_embedding = self.conceptual_model.encode(
-            text, 
-            batch_size=self.config.batch_size
-        )
-        
-        # Store context with window information
-        self.contexts[window_id] = {
-            'text': text,
-            'metadata': metadata,
-            'conceptual_embedding': conceptual_embedding.tolist(),
-            'is_window': True,
-            'window_position': window_position,
-            'parent_node_id': metadata.get('node_id')
-        }
-        
-        return window_id
+    def _text_to_vector(self, text: str) -> List[float]:
+        return self.model.encode(text).tolist()
 
     def add_context(self, text: str, metadata: Dict[str, Any]) -> None:
         """Add a new context with its embedding, using window-based approach.
@@ -178,34 +137,9 @@ class VectorStore:
             text: Context text to add
             metadata: Associated metadata
         """
-        # Store the full context first
+        vector = self._text_to_vector(text)
         vector_id = metadata.get('node_id', str(len(self.vectors)))
-        
-        # Preprocess text and compute TF-IDF for full context
-        terms = self._preprocess_text(text)
-        tf_idf_scores = self._compute_tf_idf(terms)
-        
-        # Update document frequencies
-        for term in set(terms):
-            self.doc_freq[term] += 1
-        self.total_docs += 1
-        
-        # Create vector from TF-IDF scores
-        self.vectors[vector_id] = list(tf_idf_scores.values())
-        
-        # Compute conceptual embedding for full context
-        conceptual_embedding = self.conceptual_model.encode(
-            text, 
-            batch_size=self.config.batch_size
-        )
-        
-        # Store full context
-        self.contexts[vector_id] = {
-            'text': text,
-            'metadata': metadata,
-            'conceptual_embedding': conceptual_embedding.tolist(),
-            'is_window': False
-        }
+        self.index.upsert([(vector_id, vector)])
         
         # Split text into windows and store each window
         tokens = text.split()
@@ -214,13 +148,20 @@ class VectorStore:
         for i in range(0, len(tokens), self.WINDOW_STRIDE):
             window_text = ' '.join(tokens[i:i+self.WINDOW_SIZE])
             if window_text.strip():  # Only store non-empty windows
-                window_id = self._store_window(window_text, metadata, len(window_ids) + 1)
+                window_id = f"vector_{len(self.vectors)}"
+                self.vectors[window_id] = vector
+                self.contexts[window_id] = {
+                    'text': window_text,
+                    'metadata': metadata,
+                    'is_window': True,
+                    'window_position': len(window_ids) + 1
+                }
                 window_ids.append(window_id)
         
         # Add window references to the full context
         self.contexts[vector_id]['window_ids'] = window_ids
         
-        # Save to storage
+        # Save to Pinecone
         self._save()
         logger.debug(f"Added context for node {metadata.get('node_id')} with {len(window_ids)} windows")
 
@@ -253,7 +194,7 @@ class VectorStore:
             )
             
             # Apply minimum similarity threshold
-            if similarity >= self.config.min_similarity:
+            if similarity >= 0.7:  # Assuming a default similarity threshold
                 similarities.append({
                     'node_id': vector_id,
                     'text': self.contexts[vector_id]['text'],
@@ -281,10 +222,7 @@ class VectorStore:
             return []
             
         # Encode query
-        query_embedding = self.conceptual_model.encode(
-            query, 
-            batch_size=self.config.batch_size
-        )
+        query_embedding = self._text_to_vector(query)
         
         # Compute similarities
         similarities = []
@@ -295,7 +233,7 @@ class VectorStore:
             )
             
             # Apply minimum similarity threshold
-            if similarity >= self.config.min_similarity:
+            if similarity >= 0.7:  # Assuming a default similarity threshold
                 similarities.append({
                     'node_id': vector_id,
                     'text': context['text'],
@@ -309,19 +247,16 @@ class VectorStore:
         similarities.sort(key=lambda x: x['similarity'], reverse=True)
         return similarities[:top_k]
 
-    def find_similar(self, query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
+    def find_similar(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Find similar contexts using hybrid lexical and conceptual matching.
         
         Args:
             query: Query text
-            top_k: Number of results to return (overrides config.max_results)
+            top_k: Number of results to return
             
         Returns:
             List of similar contexts with metadata
         """
-        # Use config value if top_k not specified
-        top_k = top_k or self.config.max_results
-        
         # Get lexical and conceptual matches
         lexical_results = self._find_lexical_similar(query, top_k * 2)
         conceptual_results = self._find_conceptual_similar(query, top_k * 2)
@@ -336,15 +271,9 @@ class VectorStore:
             lex_score = lexical_scores.get(node_id, 0)
             con_score = conceptual_scores.get(node_id, 0)
             combined_scores[node_id] = (
-                self.config.alpha * lex_score + 
-                (1 - self.config.alpha) * con_score
+                lex_score + 
+                con_score
             )
-        
-        # Ensure vector alignment
-        for node_id in combined_scores.keys():
-            if len(self.vectors[node_id]) != len(conceptual_results[0]['conceptual_embedding']):
-                logger.warning(f"Vector dimension mismatch for node {node_id}")
-                continue
         
         # Get top k results
         top_node_ids = sorted(combined_scores.keys(), 

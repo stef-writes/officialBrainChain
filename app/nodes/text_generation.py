@@ -88,15 +88,17 @@ class TextGenerationNode(BaseNode):
     # Shared client pool for all instances
     _client_pool = {}
     
-    def __init__(self, config: NodeConfig):
+    def __init__(self, config: NodeConfig, context_manager: ContextManager):
         """Initialize the text generation node.
         
         Args:
             config: Node configuration
+            context_manager: Context manager for handling context
         """
         super().__init__(config)
         self.llm_config = config.llm_config
         self.templates = config.templates
+        self.context_manager = context_manager  # Use the provided context manager
     
     @property
     def client(self) -> AsyncOpenAI:
@@ -134,6 +136,10 @@ class TextGenerationNode(BaseNode):
         try:
             # Run pre-execute hook
             context = await self.pre_execute(context)
+            
+            # Retrieve optimized context using LangChain
+            node_context = self.context_manager.get_context_with_optimization(self.node_id)
+            context.update(node_context)
             
             # Validate prompt
             prompt = context.get("prompt")

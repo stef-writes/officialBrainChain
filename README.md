@@ -10,6 +10,22 @@ A powerful workflow engine for building and executing AI-powered script chains.
 - **Callback System**: Comprehensive event tracking and monitoring
 - **Token Optimization**: Smart token allocation and context optimization
 
+## Integration with LangChain and Pinecone
+
+The Gaffer project now integrates LangChain and Pinecone to enhance context management and vector storage capabilities.
+
+### LangChain
+- Provides structured context management, reducing complexity and improving maintainability.
+- Supports advanced prompt management and chaining, enhancing the flexibility of script chains.
+
+### Pinecone
+- Offers efficient vector storage and retrieval, improving the performance of semantic searches.
+- Manages vector data, allowing for scalable and high-performance similarity search.
+
+### Updated Features
+- **Context Management**: Now uses LangChain for improved context handling and optimization.
+- **Vector Store**: Integrated with Pinecone for efficient vector-based context retrieval.
+
 ## Installation
 
 ```bash
@@ -44,23 +60,19 @@ chain.add_node(NodeConfig(
 result = await chain.execute()
 ```
 
-### Context Management
-
-The context manager provides intelligent context handling with vector-based retrieval:
+### Context Management with LangChain
 
 ```python
 from app.utils.context import ContextManager
 
-# Initialize context manager
+# Initialize context manager with LangChain
 context_manager = ContextManager(max_context_tokens=4000)
 
-# Set context for a node
+# Set and retrieve context
 context_manager.set_context("node1", {
     "system": "You are a creative writer",
     "output": "Once upon a time..."
 })
-
-# Get optimized context with vector retrieval
 context = context_manager.get_context_with_optimization("node1")
 ```
 
@@ -82,6 +94,19 @@ result = await chain.execute()
 
 # Get events
 events = callback.get_events()
+```
+
+### Vector Storage with Pinecone
+
+```python
+from app.context.vector import VectorStore
+
+# Initialize vector store
+vector_store = VectorStore(index_name='your-index-name')
+
+# Add and query vectors
+vector_store.add_context("Sample text", {"node_id": "node1"})
+results = vector_store.find_similar("Query text")
 ```
 
 ## Vector Store

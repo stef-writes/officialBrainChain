@@ -15,6 +15,9 @@ from app.utils.callbacks import ScriptChainCallback
 import logging
 from uuid import uuid4
 import asyncio
+from langchain import LangChain
+from langchain.vectorstores import PineconeVectorStore
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +46,15 @@ class ScriptChain:
         """
         self.chain_id = f"chain_{uuid4().hex[:8]}"
         self.graph = nx.DiGraph()
-        self.context = ContextManager(storage_path="context_store.json", max_context_tokens=max_context_tokens)
+        
+        # Initialize LangChain and Pinecone
+        self.lc = LangChain()
+        self.vector_store = PineconeVectorStore(index_name='your-index-name', api_key=os.getenv('PINECONE_API_KEY'))
+        self.lc.set_vector_store(self.vector_store)
+        
+        # Use LangChain for context management
+        self.context = self.lc.create_context(max_tokens=max_context_tokens)
+        
         self.logger = logging.getLogger(__name__)
         self.nodes: Dict[str, BaseNode] = {}
         self.retry = None
