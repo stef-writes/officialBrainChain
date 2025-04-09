@@ -1,14 +1,39 @@
 # Gaffer
 
-A powerful workflow engine for building and executing AI-powered script chains.
+A powerful workflow engine for building and executing AI-powered script chains with level-based parallel execution.
 
 ## Features
 
-- **Script Chain Execution**: Build and execute chains of AI nodes
-- **Context Management**: Intelligent context handling with token awareness
-- **Vector Store Integration**: Semantic context retrieval and storage
-- **Callback System**: Comprehensive event tracking and monitoring
-- **Token Optimization**: Smart token allocation and context optimization
+- **Enhanced Script Chain Execution**: Build and execute chains of AI nodes with level-based parallel processing
+- **Graph-based Context Management**: Intelligent context handling with graph-based inheritance and token awareness
+- **Vector Store Integration**: Semantic context retrieval and storage with similarity search
+- **Comprehensive Callback System**: Event tracking, metrics collection, and debugging capabilities
+- **Token Optimization**: Smart token allocation and context optimization with vector-based retrieval
+
+## Core Components
+
+### ScriptChain
+
+The enhanced ScriptChain implementation provides:
+- **Level-based Parallel Execution**: Nodes at the same level execute concurrently
+- **Robust Error Handling**: Comprehensive error management with retries and fallbacks
+- **Configurable Concurrency**: Control parallel execution with concurrency limits
+- **Validation**: Automatic validation of workflow structure and dependencies
+
+### GraphContextManager
+
+Advanced context management with:
+- **Graph-based Inheritance**: Context flows through the workflow graph
+- **Vector Store Integration**: Semantic similarity search for context optimization
+- **Token Awareness**: Smart token budget allocation and optimization
+- **Error Tracking**: Comprehensive error logging and tracking
+
+### Callback System
+
+Three types of callbacks for different use cases:
+- **LoggingCallback**: Production-grade logging of workflow events
+- **MetricsCallback**: Performance metrics collection and analysis
+- **DebugCallback**: Detailed debugging with event tracking and analysis
 
 ## Integration with LangChain and Pinecone
 
@@ -39,74 +64,106 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Basic Script Chain
+### Enhanced Script Chain
 
 ```python
 from app.chains.script_chain import ScriptChain
 from app.models.node_models import NodeConfig
+from app.utils.callbacks import LoggingCallback, MetricsCallback
 
-# Create a chain
-chain = ScriptChain()
+# Create a chain with configuration
+chain = ScriptChain(
+    concurrency_level=3,  # Execute up to 3 nodes in parallel
+    retry_policy={
+        'max_retries': 3,
+        'delay': 1,
+        'backoff': 2
+    }
+)
 
-# Add nodes
+# Add nodes with levels
 chain.add_node(NodeConfig(
     id="node1",
     type="llm",
     model="gpt-4",
-    prompt="Generate a creative story"
+    prompt="Generate a creative story",
+    level=0  # Base level
 ))
+
+chain.add_node(NodeConfig(
+    id="node2",
+    type="llm",
+    model="gpt-4",
+    prompt="Enhance the story",
+    level=1,  # Will execute after level 0
+    dependencies=["node1"]
+))
+
+# Add callbacks
+chain.add_callback(LoggingCallback())
+chain.add_callback(MetricsCallback())
 
 # Execute the chain
 result = await chain.execute()
 ```
 
-### Context Management with LangChain
+### Graph-based Context Management
 
 ```python
-from app.utils.context import ContextManager
+from app.utils.context import GraphContextManager
+import networkx as nx
 
-# Initialize context manager with LangChain
-context_manager = ContextManager(max_context_tokens=4000)
+# Create a workflow graph
+graph = nx.DiGraph()
+graph.add_edge("node1", "node2")
+
+# Initialize context manager with graph
+context_manager = GraphContextManager(
+    max_tokens=4000,
+    graph=graph,
+    vector_store=your_vector_store
+)
 
 # Set and retrieve context
 context_manager.set_context("node1", {
     "system": "You are a creative writer",
     "output": "Once upon a time..."
 })
-context = context_manager.get_context_with_optimization("node1")
+
+# Get optimized context with graph inheritance
+context = context_manager.get_context_with_optimization("node2")
 ```
 
-### Callback System
-
-Monitor chain execution with the callback system:
+### Comprehensive Callback System
 
 ```python
+from app.utils.callbacks import LoggingCallback, MetricsCallback
 from app.utils.debug_callback import DebugCallback
+import logging
 
-# Create a debug callback
-callback = DebugCallback()
+# Production logging
+logging_callback = LoggingCallback(log_level=logging.INFO)
 
-# Add callback to chain
-chain.add_callback(callback)
+# Metrics collection
+metrics_callback = MetricsCallback()
+
+# Debugging
+debug_callback = DebugCallback()
+
+# Add callbacks to chain
+chain.add_callback(logging_callback)
+chain.add_callback(metrics_callback)
+chain.add_callback(debug_callback)
 
 # Execute chain
 result = await chain.execute()
 
-# Get events
-events = callback.get_events()
-```
+# Access metrics
+metrics = metrics_callback.get_metrics()
+metrics_callback.export_metrics("execution_metrics.json")
 
-### Vector Storage with Pinecone
-
-```python
-from app.context.vector import VectorStore
-
-# Initialize vector store
-vector_store = VectorStore(index_name='your-index-name')
-
-# Add and query vectors
-vector_store.add_context("Sample text", {"node_id": "node1"})
-results = vector_store.find_similar("Query text")
+# Access debug events
+debug_events = debug_callback.get_events()
 ```
 
 ## Vector Store
@@ -123,7 +180,11 @@ The vector store provides semantic context retrieval:
 ### Running Tests
 
 ```bash
-python -m pytest tests/
+# Run all tests
+python -m pytest
+
+# Run with coverage
+python -m pytest --cov=app
 ```
 
 ### Code Style
@@ -146,59 +207,51 @@ MIT License
 ## Project Structure
 
 - `app/`: Main application code
-  - `api/`: API endpoints
   - `chains/`: Workflow orchestration
-  - `models/`: Data models
-  - `nodes/`: Node implementations
+    - `script_chain.py`: Enhanced ScriptChain implementation
+  - `models/`: Data models and configurations
   - `utils/`: Utility functions
-    - `context.py`: Smart context management
-    - `retry.py`: Retry mechanism for API calls
-    - `logging.py`: Enhanced logging utilities
-    - `callbacks.py`: Callback system for workflow monitoring
-    - `debug_callback.py`: Debug implementation of callbacks
-- `tests/`: Test suite with real API integration tests
-
-## Testing
-
-```bash
-# Run all tests
-python -m pytest
-
-# Run tests with coverage
-python -m pytest --cov=app
-
-# Run specific test file
-python -m pytest tests/test_script_chain.py
-```
+    - `context.py`: Graph-based context management
+    - `callbacks.py`: Production callbacks (Logging, Metrics)
+    - `debug_callback.py`: Debug callback implementation
+    - `retry.py`: Configurable retry mechanism
 
 ## Features in Detail
 
-### Smart Context Management
+### Level-based Parallel Execution
 
-The context manager includes several optimizations:
-- Token counting for different data types
-- Dynamic context summarization for long texts
-- Importance-based prioritization of context
-- Automatic truncation to stay within token limits
-- Parent context inheritance with optimization
+The ScriptChain supports parallel execution of nodes:
+- Automatic level calculation based on dependencies
+- Configurable concurrency limits
+- Semaphore-based concurrency control
+- Proper error propagation across levels
 
-### Event Callbacks
+### Graph Context Management
 
-The callback system provides comprehensive monitoring of workflow execution:
-- Chain lifecycle events (start/end)
-- Node execution events (start/complete/error)
-- Context updates
-- Customizable callback implementations
-- Built-in debug callback for logging
+The GraphContextManager provides:
+- Graph-based context inheritance
+- Vector-based context optimization
+- Token-aware context merging
+- Error tracking and logging
+- Metadata management
 
-### Error Handling
+### Callback System
 
-Comprehensive error handling includes:
-- Authentication errors
-- Rate limit handling
-- API errors
-- Network issues
-- Invalid input validation
+Three types of callbacks for different needs:
+- **LoggingCallback**: Production event logging
+  - Configurable log levels
+  - Structured log messages
+  - Chain and node lifecycle events
+- **MetricsCallback**: Performance monitoring
+  - Execution timing
+  - Token usage tracking
+  - Success/failure rates
+  - Vector store operations
+- **DebugCallback**: Detailed debugging
+  - Complete event history
+  - Context update tracking
+  - Vector operation monitoring
+  - Detailed error information
 
 ## Contributing
 
