@@ -9,7 +9,7 @@ from typing import Dict, Any, Generator
 from app.chains.script_chain import ScriptChain
 from app.utils.context import GraphContextManager
 from app.utils.callbacks import LoggingCallback, MetricsCallback
-from app.models.node_models import NodeConfig, LLMConfig
+from app.models.node_models import NodeConfig
 from app.context.vector import VectorStore
 
 @pytest.fixture
@@ -39,13 +39,14 @@ def test_graph() -> nx.DiGraph:
 @pytest.fixture
 def script_chain() -> ScriptChain:
     """Create a test ScriptChain instance."""
+    from app.utils.retry import AsyncRetry
     return ScriptChain(
         concurrency_level=2,
-        retry_policy={
-            'max_retries': 2,
-            'delay': 0.1,
-            'backoff': 1.5
-        }
+        retry_policy=AsyncRetry(
+            max_retries=2,
+            delay=0.1,
+            backoff=1.5
+        )
     )
 
 @pytest.fixture
@@ -54,47 +55,12 @@ def context_manager(test_graph: nx.DiGraph, mock_vector_store: VectorStore) -> G
     return GraphContextManager(
         max_tokens=1000,
         graph=test_graph,
-        vector_store=mock_vector_store
+        vector_store_config={
+            'index_name': 'test-index',
+            'dimension': 1536,
+            'metric': 'cosine'
+        }
     )
-
-@pytest.fixture
-def test_nodes() -> Dict[str, NodeConfig]:
-    """Create test node configurations."""
-    llm_config = LLMConfig(
-        model="gpt-4",
-        temperature=0.7,
-        max_tokens=500,
-        max_context_tokens=2000,
-        api_key="test-key"
-    )
-    return {
-        "node1": NodeConfig(
-            id="node1",
-            type="llm",
-            model="gpt-4",
-            prompt="Test prompt 1",
-            level=0,
-            llm_config=llm_config
-        ),
-        "node2": NodeConfig(
-            id="node2",
-            type="llm",
-            model="gpt-4",
-            prompt="Test prompt 2",
-            level=1,
-            dependencies=["node1"],
-            llm_config=llm_config
-        ),
-        "node3": NodeConfig(
-            id="node3",
-            type="llm",
-            model="gpt-4",
-            prompt="Test prompt 3",
-            level=2,
-            dependencies=["node2"],
-            llm_config=llm_config
-        )
-    }
 
 @pytest.fixture
 def callbacks() -> Dict[str, Any]:

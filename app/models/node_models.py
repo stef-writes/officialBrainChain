@@ -45,6 +45,8 @@ class NodeConfig(BaseModel):
     templates: Dict[str, Any] = Field(default_factory=dict, description="Message templates for the node")
     llm_config: Optional[LLMConfig] = Field(None, description="LLM configuration for the node")
     metadata: Optional[NodeMetadata] = None
+    input_schema: Dict[str, Any] = Field(default_factory=dict, description="Input schema for the node")
+    output_schema: Dict[str, Any] = Field(default_factory=dict, description="Output schema for the node")
 
     @field_validator('dependencies')
     @classmethod

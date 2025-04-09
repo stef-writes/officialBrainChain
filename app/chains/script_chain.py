@@ -93,36 +93,47 @@ class ScriptChain:
         self.callbacks.append(callback)
         logger.debug(f"Added callback handler: {callback.__class__.__name__}")
 
-    def add_node(self, node: Union[BaseNode, NodeConfig]) -> None:
-        """Register a node with dependency validation"""
-        try:
-            if isinstance(node, NodeConfig):
-                # Create a TextGenerationNode instance from the config
-                node_instance = TextGenerationNode(node, self.context)
-                node_config = node.model_dump()
-            else:
-                # Node is already a BaseNode instance
-                node_instance = node
-                node_config = node.config.model_dump()
-                
-            if node_instance.node_id in self.node_registry:
-                raise ValueError(f"Node {node_instance.node_id} already exists")
-                
-            self.node_registry[node_instance.node_id] = node_instance
-            self.nodes[node_instance.node_id] = node_instance  # For backward compatibility
-            self.graph.add_node(node_instance.node_id, node=node_instance)
+    def add_node(self, node: NodeConfig) -> None:
+        """Add a node to the workflow.
+        
+        Args:
+            node (NodeConfig): The node to add
             
-            # Add edges for declared dependencies
-            for dep_id in node_config['dependencies']:
-                if dep_id not in self.node_registry:
-                    logger.warning(f"Unresolved dependency {dep_id} for node {node_instance.node_id}")
-                self.graph.add_edge(dep_id, node_instance.node_id)
+        Raises:
+            ValueError: If adding the node would create a cyclic dependency
+        """
+        # Create a temporary graph for cycle detection
+        temp_graph = self.graph.copy()
+        temp_graph.add_node(node.id)
+        for dep in node.dependencies:
+            temp_graph.add_edge(dep, node.id)
+        
+        def has_cycle(node_id: str, visited: Set[str], path: Set[str]) -> bool:
+            if node_id in path:
+                return True
+            if node_id in visited:
+                return False
                 
-            logger.debug(f"Added node {node_instance.node_id} with {len(node_config['dependencies'])} dependencies")
+            visited.add(node_id)
+            path.add(node_id)
             
-        except ValidationError as ve:
-            logger.error(f"Invalid node configuration: {ve}")
-            raise
+            for successor in temp_graph.successors(node_id):
+                if has_cycle(successor, visited, path):
+                    return True
+                    
+            path.remove(node_id)
+            return False
+            
+        # Check for cycles starting from the new node
+        if has_cycle(node.id, set(), set()):
+            raise ValueError("Workflow contains cyclic dependencies")
+            
+        # If no cycles, add the node and its edges
+        self.nodes[node.id] = node
+        self.node_registry[node.id] = node  # Add to both dictionaries
+        self.graph.add_node(node.id)
+        for dep in node.dependencies:
+            self.graph.add_edge(dep, node.id)
 
     def add_edge(self, from_node_id: str, to_node_id: str) -> None:
         """Add a dependency edge between nodes with validation.
@@ -143,24 +154,59 @@ class ScriptChain:
             logger.debug(f"Added dependency {from_node_id} to node {to_node_id}")
 
     def validate_workflow(self) -> bool:
-        """Validate workflow structure before execution"""
-        # Check for cyclic dependencies
-        cycles = list(nx.simple_cycles(self.graph))
-        if cycles:
-            cycle_str = ", ".join([" -> ".join(cycle) for cycle in cycles])
-            logger.error(f"Workflow contains cyclic dependencies: {cycle_str}")
-            raise ValueError("Workflow contains cyclic dependencies")
+        """Validate the workflow structure.
+        
+        Checks for:
+        - Cyclic dependencies
+        - Orphan nodes (no dependencies)
+        - Disconnected components
+        
+        Raises:
+            ValueError: If cyclic dependencies are detected
+        """
+        # Check for cyclic dependencies using DFS
+        visited = set()
+        path = set()
+        
+        def has_cycle(node_id: str) -> bool:
+            if node_id in path:
+                return True
+            if node_id in visited:
+                return False
             
-        orphan_nodes = [n for n in self.graph.nodes if self.graph.in_degree(n) == 0]
-        if len(orphan_nodes) > 1:
-            logger.warning(f"Multiple orphan nodes detected: {orphan_nodes}")
+            visited.add(node_id)
+            path.add(node_id)
             
+            for successor in self.graph.successors(node_id):
+                if has_cycle(successor):
+                    return True
+                    
+            path.remove(node_id)
+            return False
+        
+        # Check each node for cycles
+        for node_id in self.nodes:
+            if has_cycle(node_id):
+                cycle_path = " -> ".join(path)
+                raise ValueError(f"Cyclic dependency detected: {cycle_path}")
+        
+        # Check for orphan nodes
+        orphans = []
+        for node_id, node in self.nodes.items():
+            if not node.dependencies and not any(
+                node_id in n.dependencies for n in self.nodes.values()
+            ):
+                orphans.append(node_id)
+            
+        if orphans:
+            logger.warning(f"Orphan nodes detected: {', '.join(orphans)}")
+        
         # Check for disconnected components
-        if not nx.is_weakly_connected(self.graph) and len(self.graph.nodes) > 1:
-            components = list(nx.weakly_connected_components(self.graph))
-            logger.warning(f"Workflow contains {len(components)} disconnected components")
-            for i, component in enumerate(components):
-                logger.warning(f"Component {i+1}: {component}")
+        components = self._find_components()
+        if len(components) > 1:
+            logger.warning(
+                f"Multiple disconnected components detected: {len(components)}"
+            )
         
         return True
 
@@ -243,13 +289,24 @@ class ScriptChain:
         
         async def process_node(node_id: str) -> Tuple[str, NodeExecutionResult]:
             async with semaphore:
-                node = self.node_registry[node_id]
+                try:
+                    node = self.node_registry[node_id]
+                except KeyError:
+                    return node_id, NodeExecutionResult(
+                        success=False,
+                        error=f"Node {node_id} not found in registry",
+                        metadata=NodeMetadata(
+                            node_id=node_id,
+                            node_type="unknown",
+                            error_type="NodeNotFoundError"
+                        )
+                    )
+                
                 if not hasattr(node, 'execute'):
                     logger.error(f"Node {node_id} does not have execute method")
                     return node_id, NodeExecutionResult(
                         success=False,
                         error=f"Node {node_id} is not properly initialized",
-                        output=None,
                         metadata=NodeMetadata(
                             node_id=node_id,
                             node_type="unknown",
@@ -263,12 +320,10 @@ class ScriptChain:
                 try:
                     # Execute with retry policy and context optimization
                     if hasattr(self, 'execute_node'):  # For test mocking
-                        result = await self.execute_node(node_id, context)
+                        result = await self.execute_node(node, node_id)
                     else:
                         result = await self.retry_policy.execute(
-                            node.execute,
-                            context,
-                            metadata={'node_id': node_id}
+                            lambda: node.execute(context)
                         )
                     
                     # Update context and metrics
@@ -284,7 +339,7 @@ class ScriptChain:
                         },
                         metadata=NodeMetadata(
                             node_id=node_id,
-                            node_type=node.config.type if hasattr(node, 'config') else "unknown",
+                            node_type=node.type if hasattr(node, 'type') else "unknown",
                             start_time=start_time,
                             end_time=datetime.utcnow()
                         )
@@ -296,10 +351,9 @@ class ScriptChain:
                     error_result = NodeExecutionResult(
                         success=False,
                         error=str(e),
-                        output=None,
                         metadata=NodeMetadata(
                             node_id=node_id,
-                            node_type=node.config.type if hasattr(node, 'config') else "unknown",
+                            node_type=node.type if hasattr(node, 'type') else "unknown",
                             start_time=start_time,
                             end_time=datetime.utcnow(),
                             error_type=e.__class__.__name__,
@@ -425,3 +479,87 @@ class ScriptChain:
                     )
             except Exception as e:
                 logger.error(f"Callback error in {callback.__class__.__name__}: {e}")
+
+    async def execute_node(self, node: BaseNode, node_id: str) -> NodeExecutionResult:
+        """Execute a single node with retry and context management.
+        
+        Args:
+            node: Node instance to execute
+            node_id: ID of the node
+            
+        Returns:
+            NodeExecutionResult containing execution output and metadata
+        """
+        try:
+            # Get optimized context using node's prompt as query
+            context = await self.context.get_context_with_optimization(
+                node_id=node_id,
+                query=node.config.prompt or "",  # Use prompt as query or empty string
+                k=5,
+                threshold=0.7
+            )
+            
+            # Execute node with retry policy
+            result = await self.retry_policy.execute(
+                lambda: node.execute(context)
+            )
+            
+            # Update context with result
+            await self.context.update(node_id, result)
+            
+            # Update metrics
+            if result.metadata and result.metadata.usage:
+                self.metrics['total_tokens'] += result.metadata.usage.total_tokens
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error executing node {node_id}: {str(e)}"
+            logger.error(error_msg)
+            self.context.log_error(node_id, e)
+            
+            # Create failure result
+            return NodeExecutionResult(
+                success=False,
+                error=error_msg,
+                metadata=NodeMetadata(
+                    start_time=datetime.utcnow(),
+                    end_time=datetime.utcnow(),
+                    usage=UsageMetadata(total_tokens=0)
+                )
+            )
+
+    def _find_components(self) -> List[Set[str]]:
+        """Find disconnected components in the workflow graph using DFS.
+        
+        Returns:
+            List[Set[str]]: List of sets containing node IDs in each component
+        """
+        components = []
+        visited = set()
+        
+        def dfs(node_id: str, component: Set[str]):
+            if node_id in visited:
+                return
+            visited.add(node_id)
+            component.add(node_id)
+            
+            # Check dependencies
+            node = self.nodes.get(node_id)
+            if node and node.dependencies:
+                for dep in node.dependencies:
+                    dfs(dep, component)
+                    
+            # Check nodes that depend on this one
+            for other_id, other_node in self.nodes.items():
+                if node_id in other_node.dependencies:
+                    dfs(other_id, component)
+        
+        # Find all components
+        for node_id in self.nodes:
+            if node_id not in visited:
+                component = set()
+                dfs(node_id, component)
+                components.append(component)
+                
+        return components
