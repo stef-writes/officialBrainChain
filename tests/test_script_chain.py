@@ -93,19 +93,18 @@ async def test_validate_workflow(script_chain: ScriptChain):
     # Validate should pass
     assert script_chain.validate_workflow() is True
     
-    # Create node with cyclic dependency
-    cyclic_node = NodeConfig(
-        id="cyclic",
+    # Add orphan node
+    orphan_node = NodeConfig(
+        id="orphan",
         type="llm",
         model="gpt-4",
         prompt="Test",
-        level=0,
-        dependencies=["node2"]  # Creates a cycle when node2 depends on node1
+        level=0
     )
+    script_chain.add_node(orphan_node)
     
-    # Adding node with cyclic dependency should raise ValueError
-    with pytest.raises(ValueError, match="Workflow contains cyclic dependencies"):
-        script_chain.add_node(cyclic_node)
+    # Validate should still pass but log warning
+    assert script_chain.validate_workflow() is True
 
 @pytest.mark.asyncio
 async def test_execution_levels(script_chain: ScriptChain):

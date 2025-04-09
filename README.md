@@ -1,258 +1,256 @@
 # Gaffer
 
-A powerful workflow engine for building and executing AI-powered script chains with level-based parallel execution.
-
-## Features
-
-- **Enhanced Script Chain Execution**: Build and execute chains of AI nodes with level-based parallel processing
-- **Graph-based Context Management**: Intelligent context handling with graph-based inheritance and token awareness
-- **Vector Store Integration**: Semantic context retrieval and storage with similarity search
-- **Comprehensive Callback System**: Event tracking, metrics collection, and debugging capabilities
-- **Token Optimization**: Smart token allocation and context optimization with vector-based retrieval
+A Python-based workflow orchestration system that provides a flexible framework for building and executing directed acyclic graphs (DAGs) of text generation nodes.
 
 ## Core Components
 
 ### ScriptChain
 
-The enhanced ScriptChain implementation provides:
-- **Level-based Parallel Execution**: Nodes at the same level execute concurrently
-- **Robust Error Handling**: Comprehensive error management with retries and fallbacks
-- **Configurable Concurrency**: Control parallel execution with concurrency limits
-- **Validation**: Automatic validation of workflow structure and dependencies
+The primary orchestration engine that manages workflow execution and node dependencies.
 
-### GraphContextManager
+#### Key Features
+- Level-based parallel execution
+- Context management with token tracking
+- Configurable LLM integration
+- Vector store integration for context retrieval
+- Workflow validation for orphan nodes and disconnected components
 
-Advanced context management with:
-- **Graph-based Inheritance**: Context flows through the workflow graph
-- **Vector Store Integration**: Semantic similarity search for context optimization
-- **Token Awareness**: Smart token budget allocation and optimization
-- **Error Tracking**: Comprehensive error logging and tracking
-
-### Callback System
-
-Three types of callbacks for different use cases:
-- **LoggingCallback**: Production-grade logging of workflow events
-- **MetricsCallback**: Performance metrics collection and analysis
-- **DebugCallback**: Detailed debugging with event tracking and analysis
-
-## Integration with LangChain and Pinecone
-
-The Gaffer project now integrates LangChain and Pinecone to enhance context management and vector storage capabilities.
-
-### LangChain
-- Provides structured context management, reducing complexity and improving maintainability.
-- Supports advanced prompt management and chaining, enhancing the flexibility of script chains.
-
-### Pinecone
-- Offers efficient vector storage and retrieval, improving the performance of semantic searches.
-- Manages vector data, allowing for scalable and high-performance similarity search.
-
-### Updated Features
-- **Context Management**: Now uses LangChain for improved context handling and optimization.
-- **Vector Store**: Integrated with Pinecone for efficient vector-based context retrieval.
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/Gaffer.git
-cd Gaffer
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Usage
-
-### Enhanced Script Chain
-
+#### Configuration
 ```python
-from app.chains.script_chain import ScriptChain
-from app.models.node_models import NodeConfig
-from app.utils.callbacks import LoggingCallback, MetricsCallback
-
-# Create a chain with configuration
-chain = ScriptChain(
-    concurrency_level=3,  # Execute up to 3 nodes in parallel
-    retry_policy={
-        'max_retries': 3,
-        'delay': 1,
-        'backoff': 2
-    }
+llm_config = LLMConfig(
+    model="gpt-4",
+    api_key="your-api-key",
+    temperature=0.7,
+    max_tokens=1000,
+    max_context_tokens=1000
 )
 
-# Add nodes with levels
-chain.add_node(NodeConfig(
-    id="node1",
-    type="llm",
-    model="gpt-4",
-    prompt="Generate a creative story",
-    level=0  # Base level
-))
-
-chain.add_node(NodeConfig(
-    id="node2",
-    type="llm",
-    model="gpt-4",
-    prompt="Enhance the story",
-    level=1,  # Will execute after level 0
-    dependencies=["node1"]
-))
-
-# Add callbacks
-chain.add_callback(LoggingCallback())
-chain.add_callback(MetricsCallback())
-
-# Execute the chain
-result = await chain.execute()
-```
-
-### Graph-based Context Management
-
-```python
-from app.utils.context import GraphContextManager
-import networkx as nx
-
-# Create a workflow graph
-graph = nx.DiGraph()
-graph.add_edge("node1", "node2")
-
-# Initialize context manager with graph
-context_manager = GraphContextManager(
-    max_tokens=4000,
-    graph=graph,
-    vector_store=your_vector_store
+script_chain = ScriptChain(
+    llm_config=llm_config,
+    vector_store=vector_store  # Optional
 )
-
-# Set and retrieve context
-context_manager.set_context("node1", {
-    "system": "You are a creative writer",
-    "output": "Once upon a time..."
-})
-
-# Get optimized context with graph inheritance
-context = context_manager.get_context_with_optimization("node2")
 ```
 
-### Comprehensive Callback System
+### Node System
 
+#### TextGenerationNode
+- Primary node type for text generation
+- Supports async execution
+- Integrates with OpenAI's GPT models
+- Handles context window management
+- Token usage tracking
+
+#### Node Configuration
 ```python
-from app.utils.callbacks import LoggingCallback, MetricsCallback
-from app.utils.debug_callback import DebugCallback
-import logging
-
-# Production logging
-logging_callback = LoggingCallback(log_level=logging.INFO)
-
-# Metrics collection
-metrics_callback = MetricsCallback()
-
-# Debugging
-debug_callback = DebugCallback()
-
-# Add callbacks to chain
-chain.add_callback(logging_callback)
-chain.add_callback(metrics_callback)
-chain.add_callback(debug_callback)
-
-# Execute chain
-result = await chain.execute()
-
-# Access metrics
-metrics = metrics_callback.get_metrics()
-metrics_callback.export_metrics("execution_metrics.json")
-
-# Access debug events
-debug_events = debug_callback.get_events()
+node_config = NodeConfig(
+    node_id="unique_id",
+    prompt_template="Your prompt template",
+    dependencies=["dependency1", "dependency2"],
+    max_tokens=1000,
+    temperature=0.7
+)
 ```
 
-## Vector Store
+### Context Management
 
-The vector store provides semantic context retrieval:
+#### VectorStore
+- Abstract interface for vector storage
+- Supports similarity search
+- Configurable chunk size and overlap
+- Metadata storage capabilities
 
-- **Context Storage**: Automatically stores node contexts with metadata
-- **Semantic Search**: Find similar contexts using vector similarity
-- **Token Optimization**: Smart allocation of token budget for vector results
-- **Event Tracking**: Monitor vector operations through the callback system
+#### ContextWindow
+- Manages token limits
+- Handles context truncation
+- Supports metadata tracking
+- Configurable window size
+
+### Workflow Execution
+
+#### Level-based Processing
+1. Nodes are organized into execution levels
+2. Each level executes in parallel
+3. Dependencies are resolved automatically
+4. Results are propagated to dependent nodes
+
+#### Error Handling
+- Graceful failure handling
+- Error propagation
+- Node-level error isolation
+- Execution state preservation
+
+### Testing Framework
+
+#### Test Coverage
+- Unit tests for core components
+- Integration tests for workflow execution
+- Mock implementations for external services
+- Fixture-based test setup
+
+#### Key Test Areas
+- Node initialization
+- Workflow validation
+- Parallel execution
+- Error handling
+- Context management
+- Vector store integration
+
+## Technical Implementation
+
+### Dependencies
+- Python 3.8+
+- langchain
+- langchain-community
+- pydantic
+- pytest
+- pytest-asyncio
+- pytest-cov
+
+### Project Structure
+```
+app/
+├── api/
+│   └── routes.py
+├── chains/
+│   └── script_chain.py
+├── context/
+│   └── vector.py
+├── models/
+│   ├── config.py
+│   ├── node_models.py
+│   └── vector_store.py
+├── nodes/
+│   └── text_generation.py
+├── utils/
+│   ├── callbacks.py
+│   ├── context.py
+│   └── logging.py
+└── vector/
+    └── store.py
+```
+
+### Key Classes and Interfaces
+
+#### ScriptChain
+- Manages workflow execution
+- Handles node dependencies
+- Controls parallel execution
+- Manages context and state
+
+#### TextGenerationNode
+- Executes text generation
+- Manages LLM interactions
+- Handles prompt templating
+- Tracks token usage
+
+#### VectorStore
+- Abstract base class for vector storage
+- Defines interface for similarity search
+- Manages document storage and retrieval
+
+#### ContextWindow
+- Manages token limits
+- Handles context truncation
+- Tracks metadata
+
+### Configuration System
+
+#### LLMConfig
+- Model configuration
+- API settings
+- Token limits
+- Generation parameters
+
+#### NodeConfig
+- Node identification
+- Prompt templates
+- Dependencies
+- Generation parameters
+
+### Error Handling
+
+#### Retry Mechanism
+- Configurable retry attempts
+- Exponential backoff
+- Error type filtering
+- State preservation
+
+#### Error Types
+- ValidationError
+- ExecutionError
+- ContextError
+- VectorStoreError
+
+### Testing Infrastructure
+
+#### Test Fixtures
+- ScriptChain setup
+- Node configuration
+- Vector store mocking
+- Context management
+
+#### Test Categories
+- Initialization tests
+- Execution tests
+- Error handling tests
+- Integration tests
 
 ## Development
 
-### Running Tests
-
+### Testing
 ```bash
 # Run all tests
 python -m pytest
 
+# Run specific test file
+python -m pytest tests/test_script_chain.py
+
 # Run with coverage
-python -m pytest --cov=app
+python -m pytest --cov=app tests/
 ```
 
 ### Code Style
+- PEP 8 compliance
+- Type hints
+- Docstring documentation
+- Clear error messages
 
-```bash
-# Format code
-black .
+### Error Handling
+- Graceful degradation
+- Detailed error messages
+- State preservation
+- Recovery mechanisms
 
-# Sort imports
-isort .
+## Technical Limitations
 
-# Type checking
-mypy .
-```
+### Context Management
+- Fixed token limits
+- Context window constraints
+- Metadata storage limits
 
-## License
+### Vector Store
+- Abstract interface only
+- No default implementation
+- Requires custom implementation
 
-MIT License
+### Node System
+- Single node type (TextGenerationNode)
+- Fixed dependency model
+- Synchronous execution only
 
-## Project Structure
+### Error Handling
+- Basic retry mechanism
+- Limited error recovery
+- State preservation constraints
 
-- `app/`: Main application code
-  - `chains/`: Workflow orchestration
-    - `script_chain.py`: Enhanced ScriptChain implementation
-  - `models/`: Data models and configurations
-  - `utils/`: Utility functions
-    - `context.py`: Graph-based context management
-    - `callbacks.py`: Production callbacks (Logging, Metrics)
-    - `debug_callback.py`: Debug callback implementation
-    - `retry.py`: Configurable retry mechanism
+## Future Considerations
 
-## Features in Detail
-
-### Level-based Parallel Execution
-
-The ScriptChain supports parallel execution of nodes:
-- Automatic level calculation based on dependencies
-- Configurable concurrency limits
-- Semaphore-based concurrency control
-- Proper error propagation across levels
-
-### Graph Context Management
-
-The GraphContextManager provides:
-- Graph-based context inheritance
-- Vector-based context optimization
-- Token-aware context merging
-- Error tracking and logging
-- Metadata management
-
-### Callback System
-
-Three types of callbacks for different needs:
-- **LoggingCallback**: Production event logging
-  - Configurable log levels
-  - Structured log messages
-  - Chain and node lifecycle events
-- **MetricsCallback**: Performance monitoring
-  - Execution timing
-  - Token usage tracking
-  - Success/failure rates
-  - Vector store operations
-- **DebugCallback**: Detailed debugging
-  - Complete event history
-  - Context update tracking
-  - Vector operation monitoring
-  - Detailed error information
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. 
+### Potential Enhancements
+- Additional node types
+- Enhanced error recovery
+- Extended context management
+- Vector store implementations
+- Async node execution
+- Dynamic workflow modification
+- Enhanced monitoring
+- Performance optimization 

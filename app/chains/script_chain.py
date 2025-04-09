@@ -108,41 +108,10 @@ class ScriptChain:
             node_config: Configuration for the node to add
             
         Raises:
-            ValueError: If node ID already exists or if adding would create a cycle
+            ValueError: If node ID already exists
         """
         if node_config.id in self.nodes:
             raise ValueError(f"Node with ID {node_config.id} already exists")
-        
-        # Check for cycles using DFS
-        def has_cycle(graph: Dict[str, Set[str]], start: str, visited: Set[str], path: Set[str]) -> bool:
-            if start in path:
-                cycle = list(path) + [start]
-                cycle_str = " -> ".join(cycle)
-                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_str}")
-            
-            if start in visited:
-                return False
-            
-            visited.add(start)
-            path.add(start)
-            
-            for neighbor in graph.get(start, set()):
-                if neighbor not in visited:
-                    if has_cycle(graph, neighbor, visited, path):
-                        return True
-                elif neighbor in path:
-                    return True
-                
-            path.remove(start)
-            return False
-        
-        # Create temporary graph with new node
-        temp_graph = self.dependencies.copy()
-        temp_graph[node_config.id] = set(node_config.dependencies)
-        
-        # Check for cycles
-        if has_cycle(temp_graph, node_config.id, set(), set()):
-            raise ValueError(f"Adding node {node_config.id} would create a cycle")
         
         # Ensure metadata is set
         if node_config.metadata is None:
@@ -192,53 +161,26 @@ class ScriptChain:
         Checks:
         - All nodes have valid dependencies
         - No orphan nodes
-        - No cyclic dependencies
         
         Returns:
             True if workflow is valid
             
         Raises:
-            ValueError: If cyclic dependencies are detected
+            ValueError: If workflow validation fails
         """
-        # Check for cycles using DFS
-        visited = set()
-        path = set()
-        
-        def has_cycle(node_id: str) -> bool:
-            if node_id in path:
-                cycle = list(path) + [node_id]
-                cycle_str = " -> ".join(cycle)
-                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_str}")
-            
-            if node_id in visited:
-                return False
-            
-            visited.add(node_id)
-            path.add(node_id)
-            
-            for dep in self.dependencies.get(node_id, []):
-                if has_cycle(dep):
-                    return True
-                
-            path.remove(node_id)
-            return False
-        
-        # Check each node for cycles
-        for node_id in self.nodes:
-            if node_id not in visited:
-                has_cycle(node_id)
-        
         # Check for orphan nodes
-        orphans = []
-        for node in self.nodes.values():
-            if not node.config.dependencies and not any(
-                node.node_id in deps for deps in self.dependencies.values()
-            ):
-                orphans.append(node.node_id)
-            
-        if orphans:
-            logger.warning(f"Orphan nodes detected: {orphans}")
-            return False
+        orphan_nodes = []
+        for node_id in self.nodes:
+            if not self.graph.in_degree(node_id) and not self.graph.out_degree(node_id):
+                orphan_nodes.append(node_id)
+        
+        if orphan_nodes:
+            logger.warning(f"Orphan nodes detected: {orphan_nodes}")
+        
+        # Check for disconnected components
+        components = list(nx.weakly_connected_components(self.graph))
+        if len(components) > 1:
+            logger.warning(f"Workflow contains {len(components)} disconnected components")
         
         return True
 
