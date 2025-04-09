@@ -13,11 +13,17 @@ from datetime import datetime
 
 @pytest.mark.asyncio
 async def test_script_chain_initialization(script_chain: ScriptChain):
-    """Test ScriptChain initialization with different configurations."""
+    """Test ScriptChain initialization."""
+    assert script_chain.max_context_tokens == 1000
     assert script_chain.concurrency_level == 2
-    assert script_chain.retry_policy.max_retries == 2
-    assert script_chain.retry_policy.delay == 0.1
-    assert script_chain.retry_policy.backoff == 1.5
+    assert script_chain.nodes == {}
+    assert script_chain.dependencies == {}
+    assert script_chain.execution_levels == {}
+    assert script_chain.llm_config.model == "gpt-4"
+    assert script_chain.llm_config.api_key == "test-key"
+    assert script_chain.llm_config.temperature == 0.7
+    assert script_chain.llm_config.max_tokens == 500
+    assert script_chain.llm_config.max_context_tokens == 1000
 
 @pytest.mark.asyncio
 async def test_add_node(script_chain: ScriptChain):

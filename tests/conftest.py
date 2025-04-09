@@ -9,7 +9,7 @@ from typing import Dict, Any, Generator
 from app.chains.script_chain import ScriptChain
 from app.utils.context import GraphContextManager
 from app.utils.callbacks import LoggingCallback, MetricsCallback
-from app.models.node_models import NodeConfig
+from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata
 from app.context.vector import VectorStore
 
 @pytest.fixture
@@ -38,16 +38,13 @@ def test_graph() -> nx.DiGraph:
 
 @pytest.fixture
 def script_chain() -> ScriptChain:
-    """Create a test ScriptChain instance."""
-    from app.utils.retry import AsyncRetry
-    return ScriptChain(
+    """Create a ScriptChain instance for testing."""
+    chain = ScriptChain(
+        max_context_tokens=1000,
         concurrency_level=2,
-        retry_policy=AsyncRetry(
-            max_retries=2,
-            delay=0.1,
-            backoff=1.5
-        )
+        llm_config={"model": "gpt-4", "api_key": "test-key"}
     )
+    return chain
 
 @pytest.fixture
 def context_manager(test_graph: nx.DiGraph, mock_vector_store: VectorStore) -> GraphContextManager:
@@ -64,7 +61,7 @@ def context_manager(test_graph: nx.DiGraph, mock_vector_store: VectorStore) -> G
 
 @pytest.fixture
 def callbacks() -> Dict[str, Any]:
-    """Create test callback instances."""
+    """Create callback instances for testing."""
     return {
         "logging": LoggingCallback(),
         "metrics": MetricsCallback()

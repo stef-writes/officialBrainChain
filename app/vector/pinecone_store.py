@@ -38,25 +38,27 @@ class PineconeVectorStore(VectorStoreInterface):
         """Initialize Pinecone resources"""
         try:
             # Initialize Pinecone
-            pinecone.init(
+            self.pinecone = pinecone.Pinecone(
                 api_key=self.config.api_key,
                 environment=self.config.environment
             )
             
             # Create index if it doesn't exist
-            if self.config.index_name not in pinecone.list_indexes():
-                pinecone.create_index(
+            if self.config.index_name not in [index.name for index in self.pinecone.list_indexes()]:
+                self.pinecone.create_index(
                     name=self.config.index_name,
                     dimension=self.config.dimension,
                     metric=self.config.metric.value,
-                    pod_type=self.config.pod_type,
-                    replicas=self.config.replicas,
-                    metadata_config=self.config.metadata_config
+                    spec=pinecone.IndexSpec(
+                        pod_type=self.config.pod_type,
+                        pods=self.config.replicas,
+                        metadata_config=self.config.metadata_config
+                    )
                 )
                 logger.info(f"Created new Pinecone index: {self.config.index_name}")
             
             # Connect to index
-            self.index = pinecone.Index(self.config.index_name)
+            self.index = self.pinecone.Index(self.config.index_name)
             logger.info(f"Connected to Pinecone index: {self.config.index_name}")
             
         except Exception as e:
@@ -150,7 +152,11 @@ class PineconeVectorStore(VectorStoreInterface):
             
             await with_retry(
                 lambda: self.index.upsert(
-                    vectors=zip(batch_ids, batch_vectors, batch_metadata)
+                    vectors=[{
+                        'id': id,
+                        'values': vector,
+                        'metadata': meta
+                    } for id, vector, meta in zip(batch_ids, batch_vectors, batch_metadata)]
                 )
             )
         
@@ -200,27 +206,22 @@ class PineconeVectorStore(VectorStoreInterface):
                 )
             )
             
-            # Convert to VectorSearchResult objects
+            # Convert results to VectorSearchResult objects
             search_results = []
             for match in results.matches:
                 search_results.append(
                     VectorSearchResult(
                         id=match.id,
                         score=float(match.score),
-                        metadata=match.metadata,
-                        vector=match.values if hasattr(match, 'values') else None
+                        vector=match.values,
+                        metadata=match.metadata
                     )
                 )
-            
-            logger.debug(
-                f"Found {len(search_results)} matches "
-                f"(top score: {search_results[0].score if search_results else 'N/A'})"
-            )
             
             return search_results
             
         except Exception as e:
-            raise VectorStoreError(f"Search failed: {str(e)}")
+            raise VectorStoreError(f"Failed to search vectors: {str(e)}")
     
     async def delete_vectors(self, ids: List[str]) -> None:
         """Delete vectors from Pinecone.
@@ -250,10 +251,10 @@ class PineconeVectorStore(VectorStoreInterface):
             raise VectorStoreError(f"Failed to delete vectors: {str(e)}")
     
     async def get_stats(self) -> Dict[str, Any]:
-        """Get index statistics.
+        """Get statistics about the vector store.
         
         Returns:
-            Dictionary containing index statistics
+            Dictionary containing statistics
             
         Raises:
             VectorStoreError: If operation fails
@@ -268,8 +269,8 @@ class PineconeVectorStore(VectorStoreInterface):
             return {
                 "dimension": stats.dimension,
                 "index_fullness": stats.index_fullness,
-                "namespaces": stats.namespaces,
-                "total_vector_count": stats.total_vector_count
+                "total_vector_count": stats.total_vector_count,
+                "namespaces": stats.namespaces
             }
         except Exception as e:
             raise VectorStoreError(f"Failed to get stats: {str(e)}") 

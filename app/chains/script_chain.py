@@ -9,7 +9,6 @@ from pydantic import BaseModel, ValidationError
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata, UsageMetadata
 from app.models.config import LLMConfig, MessageTemplate
 from app.utils.context import GraphContextManager
-from app.utils.retry import AsyncRetry
 from app.nodes.base import BaseNode
 from app.nodes.text_generation import TextGenerationNode
 from app.utils.callbacks import ScriptChainCallback
@@ -38,15 +37,30 @@ class ScriptChain:
         max_context_tokens: int = 4000,
         callbacks: Optional[List[ScriptChainCallback]] = None,
         concurrency_level: int = 10,
-        retry_policy: Optional[AsyncRetry] = None,
-        vector_store_config: Optional[Dict] = None
+        vector_store_config: Optional[Dict] = None,
+        llm_config: Optional[Dict[str, Any]] = None
     ):
         """Initialize the script chain with enhanced configuration"""
         self.chain_id = f"chain_{uuid4().hex[:8]}"
         self.graph = nx.DiGraph()
         self.nodes = {}  # For backward compatibility
+        self.dependencies = {}  # Map of node_id to list of dependencies
+        self.execution_levels = {}  # Map of level to ExecutionLevel
         self.node_registry: Dict[str, BaseNode] = {}
         self.callbacks = callbacks or []
+        self.max_context_tokens = max_context_tokens
+        
+        # Convert llm_config dict to LLMConfig instance
+        default_llm_config = {
+            "model": "gpt-4",
+            "api_key": os.getenv("OPENAI_API_KEY"),
+            "max_context_tokens": max_context_tokens,
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+        if llm_config:
+            default_llm_config.update(llm_config)
+        self.llm_config = LLMConfig(**default_llm_config)
         
         # Initialize vector store with configurable settings
         vs_config = VectorStoreConfig(
@@ -68,12 +82,6 @@ class ScriptChain:
         
         # Execution configuration
         self.concurrency_level = concurrency_level
-        self.retry_policy = retry_policy or AsyncRetry(
-            max_retries=3,
-            delay=0.5,
-            backoff=2,
-            exceptions=(Exception,)
-        )
         
         # Observability
         self.metrics = {
@@ -93,59 +101,72 @@ class ScriptChain:
         self.callbacks.append(callback)
         logger.debug(f"Added callback handler: {callback.__class__.__name__}")
 
-    def add_node(self, node: NodeConfig) -> None:
+    def add_node(self, node_config: NodeConfig) -> None:
         """Add a node to the workflow.
         
         Args:
-            node (NodeConfig): The node to add
+            node_config: Configuration for the node to add
             
         Raises:
-            ValueError: If adding the node would create a cyclic dependency
+            ValueError: If node ID already exists or if adding would create a cycle
         """
-        # Create a temporary graph for cycle detection
-        temp_graph = self.graph.copy()
-        temp_graph.add_node(node.id)
-        for dep in node.dependencies:
-            temp_graph.add_edge(dep, node.id)
+        if node_config.id in self.nodes:
+            raise ValueError(f"Node with ID {node_config.id} already exists")
         
-        def has_cycle(node_id: str, visited: Set[str], path: Set[str]) -> bool:
-            if node_id in path:
-                return True
-            if node_id in visited:
+        # Check for cycles using DFS
+        def has_cycle(graph: Dict[str, Set[str]], start: str, visited: Set[str], path: Set[str]) -> bool:
+            if start in path:
+                cycle = list(path) + [start]
+                cycle_str = " -> ".join(cycle)
+                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_str}")
+            
+            if start in visited:
                 return False
-                
-            visited.add(node_id)
-            path.add(node_id)
             
-            for successor in temp_graph.successors(node_id):
-                if has_cycle(successor, visited, path):
+            visited.add(start)
+            path.add(start)
+            
+            for neighbor in graph.get(start, set()):
+                if neighbor not in visited:
+                    if has_cycle(graph, neighbor, visited, path):
+                        return True
+                elif neighbor in path:
                     return True
-                    
-            path.remove(node_id)
+                
+            path.remove(start)
             return False
-            
-        # Check for cycles starting from the new node
-        if has_cycle(node.id, set(), set()):
-            raise ValueError("Workflow contains cyclic dependencies")
-            
-        # If no cycles, add the node and its edges
-        self.nodes[node.id] = node
         
-        # Create proper node instance based on type
-        if node.type == "llm":
-            node_instance = TextGenerationNode(
-                config=node,
-                context_manager=self.context
+        # Create temporary graph with new node
+        temp_graph = self.dependencies.copy()
+        temp_graph[node_config.id] = set(node_config.dependencies)
+        
+        # Check for cycles
+        if has_cycle(temp_graph, node_config.id, set(), set()):
+            raise ValueError(f"Adding node {node_config.id} would create a cycle")
+        
+        # Ensure metadata is set
+        if node_config.metadata is None:
+            node_config.metadata = NodeMetadata(
+                node_id=node_config.id,
+                node_type=node_config.type,
+                version="1.0.0",
+                description=f"Node {node_config.id} of type {node_config.type}"
             )
-        else:
-            node_instance = BaseNode(
-                config=node
-            )
-            
-        self.node_registry[node.id] = node_instance
-        self.graph.add_node(node.id)
-        for dep in node.dependencies:
-            self.graph.add_edge(dep, node.id)
+        
+        # Create and store the node
+        node = TextGenerationNode(
+            config=node_config,
+            context_manager=self.context,
+            llm_config=self.llm_config
+        )
+        
+        self.nodes[node_config.id] = node
+        self.dependencies[node_config.id] = set(node_config.dependencies)
+        
+        self.node_registry[node_config.id] = node
+        self.graph.add_node(node_config.id)
+        for dep in node_config.dependencies:
+            self.graph.add_edge(dep, node_config.id)
 
     def add_edge(self, from_node_id: str, to_node_id: str) -> None:
         """Add a dependency edge between nodes with validation.
@@ -166,59 +187,58 @@ class ScriptChain:
             logger.debug(f"Added dependency {from_node_id} to node {to_node_id}")
 
     def validate_workflow(self) -> bool:
-        """Validate the workflow structure.
+        """Validate the workflow configuration.
         
-        Checks for:
-        - Cyclic dependencies
-        - Orphan nodes (no dependencies)
-        - Disconnected components
+        Checks:
+        - All nodes have valid dependencies
+        - No orphan nodes
+        - No cyclic dependencies
         
+        Returns:
+            True if workflow is valid
+            
         Raises:
             ValueError: If cyclic dependencies are detected
         """
-        # Check for cyclic dependencies using DFS
+        # Check for cycles using DFS
         visited = set()
         path = set()
         
         def has_cycle(node_id: str) -> bool:
             if node_id in path:
-                cycle_path = " -> ".join(list(path) + [node_id])
-                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_path}")
+                cycle = list(path) + [node_id]
+                cycle_str = " -> ".join(cycle)
+                raise ValueError(f"Workflow contains cyclic dependencies: {cycle_str}")
+            
             if node_id in visited:
                 return False
             
             visited.add(node_id)
             path.add(node_id)
             
-            for successor in self.graph.successors(node_id):
-                if has_cycle(successor):
+            for dep in self.dependencies.get(node_id, []):
+                if has_cycle(dep):
                     return True
-                    
+                
             path.remove(node_id)
             return False
         
         # Check each node for cycles
         for node_id in self.nodes:
-            if has_cycle(node_id):
-                return False
+            if node_id not in visited:
+                has_cycle(node_id)
         
         # Check for orphan nodes
         orphans = []
-        for node_id, node in self.nodes.items():
-            if not node.dependencies and not any(
-                node_id in n.dependencies for n in self.nodes.values()
+        for node in self.nodes.values():
+            if not node.config.dependencies and not any(
+                node.node_id in deps for deps in self.dependencies.values()
             ):
-                orphans.append(node_id)
+                orphans.append(node.node_id)
             
         if orphans:
-            logger.warning(f"Orphan nodes detected: {', '.join(orphans)}")
-        
-        # Check for disconnected components
-        components = self._find_components()
-        if len(components) > 1:
-            logger.warning(
-                f"Multiple disconnected components detected: {len(components)}"
-            )
+            logger.warning(f"Orphan nodes detected: {orphans}")
+            return False
         
         return True
 
@@ -260,76 +280,72 @@ class ScriptChain:
         return levels
 
     async def execute(self) -> NodeExecutionResult:
-        """Execute workflow with level-based parallel processing"""
-        self.validate_workflow()
-        execution_levels = self._calculate_execution_levels()
-        self.metrics['start_time'] = datetime.utcnow()
+        """Execute the workflow.
         
-        # Notify execution start
-        await self._trigger_callbacks('chain_start', NodeExecutionResult(
-            success=True,
-            output={
-                'chain_id': self.chain_id,
-                'total_nodes': len(self.node_registry),
-                'execution_levels': [l.model_dump() for l in execution_levels]
-            },
-            metadata=NodeMetadata(
-                node_id=self.chain_id,
-                node_type="chain",
-                start_time=self.metrics['start_time']
-            )
-        ))
+        Returns:
+            NodeExecutionResult with success/failure and output
+        """
+        start_time = datetime.utcnow()
         
-        results = {}
         try:
-            for level in execution_levels:
-                level_results = await self._process_level(level)
-                results.update(level_results)
+            # Calculate execution levels
+            levels = self._calculate_execution_levels()
+            
+            # Process each level
+            results = {}
+            for level in levels:
+                level_result = await self._process_level(level)
+                results.update(level_result.output)
                 
-                if any(not r.success for r in level_results.values()):
-                    failed_nodes = [(nid, r) for nid, r in level_results.items() if not r.success]
-                    error_message = failed_nodes[0][1].error if failed_nodes else f"Execution failed at level {level.level}"
+                if not level_result.success:
+                    # Get error messages from failed nodes
+                    error_messages = []
+                    for node_id, result in level_result.output.items():
+                        if not result.success:
+                            error_messages.append(f"{node_id}: {result.error}")
+                    
+                    error_msg = f"Execution failed at level {level.level}: {'; '.join(error_messages)}"
                     return NodeExecutionResult(
                         success=False,
-                        error=error_message,
+                        error=error_msg,
                         output=results,
                         metadata=NodeMetadata(
-                            node_id=self.chain_id,
+                            node_id=f"chain_{uuid4().hex[:8]}",
                             node_type="chain",
-                            start_time=self.metrics['start_time'],
+                            start_time=start_time,
                             end_time=datetime.utcnow(),
                             error_type="LevelExecutionError"
                         )
                     )
-                
+            
+            # All levels completed successfully
             return NodeExecutionResult(
                 success=True,
                 output=results,
                 metadata=NodeMetadata(
-                    node_id=self.chain_id,
+                    node_id=f"chain_{uuid4().hex[:8]}",
                     node_type="chain",
-                    start_time=self.metrics['start_time'],
+                    start_time=start_time,
                     end_time=datetime.utcnow()
                 )
             )
             
         except Exception as e:
-            logger.error(f"Critical chain failure: {traceback.format_exc()}")
+            logger.error(f"Chain execution failed: {str(e)}")
             return NodeExecutionResult(
                 success=False,
                 error=str(e),
-                output=results,
+                output=None,
                 metadata=NodeMetadata(
-                    node_id=self.chain_id,
+                    node_id=f"chain_{uuid4().hex[:8]}",
                     node_type="chain",
-                    start_time=self.metrics['start_time'],
+                    start_time=start_time,
                     end_time=datetime.utcnow(),
-                    error_type=e.__class__.__name__,
-                    error_traceback=traceback.format_exc()
+                    error_type=e.__class__.__name__
                 )
             )
 
-    async def _process_level(self, level: ExecutionLevel) -> Dict[str, NodeExecutionResult]:
+    async def _process_level(self, level: ExecutionLevel) -> NodeExecutionResult:
         """Process all nodes in a level with controlled concurrency"""
         semaphore = asyncio.Semaphore(self.concurrency_level)
         
@@ -360,17 +376,14 @@ class ScriptChain:
                         )
                     )
                 
-                context = self.context.get_context(node_id)
                 start_time = datetime.utcnow()
                 
                 try:
-                    # Execute with retry policy and context optimization
+                    # Simple execution with error handling
                     if hasattr(self, 'execute_node'):  # For test mocking
-                        result = await self.execute_node(node, node_id)
+                        result = await self.execute_node(node_id)
                     else:
-                        result = await self.retry_policy.execute(
-                            lambda: node.execute(context)
-                        )
+                        result = await node.execute()
                     
                     # Update context and metrics
                     await self.context.update(node_id, result)
@@ -411,7 +424,16 @@ class ScriptChain:
 
         tasks = [process_node(node_id) for node_id in level.node_ids]
         results = await asyncio.gather(*tasks)
-        return dict(results)
+        return NodeExecutionResult(
+            success=all(r.success for nid, r in results.items()),
+            output=dict(results),
+            metadata=NodeMetadata(
+                node_id=self.chain_id,
+                node_type="chain",
+                start_time=start_time,
+                end_time=datetime.utcnow()
+            )
+        )
 
     def _update_metrics(self, node_id: str, result: NodeExecutionResult) -> None:
         """Update chain metrics with node execution results"""
@@ -469,52 +491,32 @@ class ScriptChain:
             except Exception as e:
                 logger.error(f"Callback error in {callback.__class__.__name__}: {e}")
 
-    async def execute_node(self, node: BaseNode, node_id: str) -> NodeExecutionResult:
-        """Execute a single node with retry and context management.
+    async def execute_node(self, node_id: str) -> NodeExecutionResult:
+        """Execute a single node.
         
         Args:
-            node: Node instance to execute
-            node_id: ID of the node
+            node_id: ID of the node to execute
             
         Returns:
-            NodeExecutionResult containing execution output and metadata
+            NodeExecutionResult containing the execution result
         """
+        node = self.node_registry[node_id]
+        start_time = datetime.utcnow()
+        
         try:
-            # Get optimized context using node's prompt as query
-            context = await self.context.get_context_with_optimization(
-                node_id=node_id,
-                query=node.config.prompt or "",  # Use prompt as query or empty string
-                k=5,
-                threshold=0.7
-            )
-            
-            # Execute node with retry policy
-            result = await self.retry_policy.execute(
-                lambda: node.execute(context)
-            )
-            
-            # Update context with result
-            await self.context.update(node_id, result)
-            
-            # Update metrics
-            if result.metadata and result.metadata.usage:
-                self.metrics['total_tokens'] += result.metadata.usage.total_tokens
-            
+            result = await node.execute()
             return result
-            
         except Exception as e:
-            error_msg = f"Error executing node {node_id}: {str(e)}"
-            logger.error(error_msg)
-            self.context.log_error(node_id, e)
-            
-            # Create failure result
+            logger.error(f"Node {node_id} execution failed: {str(e)}")
             return NodeExecutionResult(
                 success=False,
-                error=error_msg,
+                error=str(e),
                 metadata=NodeMetadata(
-                    start_time=datetime.utcnow(),
+                    node_id=node_id,
+                    node_type=node.type,
+                    start_time=start_time,
                     end_time=datetime.utcnow(),
-                    usage=UsageMetadata(total_tokens=0)
+                    error_type=e.__class__.__name__
                 )
             )
 

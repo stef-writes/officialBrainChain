@@ -8,12 +8,11 @@ Provides pre-configured node setups for different use cases with:
 - Production-ready defaults
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from app.models.nodes import NodeConfig, NodeMetadata
 from app.models.config import LLMConfig, MessageTemplate
-from app.utils.context import ContextManager
-from app.utils.retry import AsyncRetry
+from app.utils.context import ContextManager, GraphContextManager
 
 @dataclass
 class TextGenPreset:
@@ -42,8 +41,7 @@ class TextGenerationConfigFactory:
                 timeout=preset.timeout
             ),
             "llm_config": preset.llm_config,
-            "context_manager": context_manager,
-            "retry": AsyncRetry(max_retries=preset.max_retries)
+            "context_manager": context_manager
         }
 
     # Predefined configurations
@@ -198,4 +196,35 @@ class TextGenerationConfigFactory:
                 "complexity_analysis": "str"
             },
             timeout=90.0
-        ) 
+        )
+
+def create_script_chain(
+    max_context_tokens: int = 4000,
+    concurrency_level: int = 10,
+    vector_store_config: Optional[Dict[str, Any]] = None
+) -> ScriptChain:
+    """Create a new ScriptChain instance with default configuration.
+    
+    Args:
+        max_context_tokens: Maximum tokens for context window
+        concurrency_level: Maximum concurrent node executions
+        vector_store_config: Optional vector store configuration
+        
+    Returns:
+        Configured ScriptChain instance
+    """
+    # Create callbacks
+    callbacks = [
+        LoggingCallback(),
+        MetricsCallback()
+    ]
+    
+    # Create chain
+    chain = ScriptChain(
+        max_context_tokens=max_context_tokens,
+        callbacks=callbacks,
+        concurrency_level=concurrency_level,
+        vector_store_config=vector_store_config
+    )
+    
+    return chain 
