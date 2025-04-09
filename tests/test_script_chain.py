@@ -6,7 +6,15 @@ import pytest
 import asyncio
 from typing import Dict, Any
 from app.chains.script_chain import ScriptChain, ExecutionLevel
-from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata, UsageMetadata
+from app.models.node_models import (
+    NodeConfig, 
+    NodeExecutionResult, 
+    NodeMetadata, 
+    UsageMetadata,
+    ContextFormat,
+    ContextRule,
+    InputMapping
+)
 from app.utils.callbacks import LoggingCallback, MetricsCallback
 from app.models.config import LLMConfig
 from datetime import datetime
@@ -310,3 +318,168 @@ async def test_retry_mechanism(script_chain: ScriptChain):
     assert result.success
     assert attempts == 3
     assert result.output is not None 
+
+@pytest.mark.asyncio
+async def test_add_node_with_context_rules(script_chain: ScriptChain):
+    """Test adding nodes with context rules and format specifications."""
+    # Create test node with context rules
+    node = NodeConfig(
+        id="test_node",
+        type="llm",
+        model="gpt-4",
+        prompt="Test prompt with {input1} and {input2}",
+        level=0,
+        context_rules={
+            "input1": ContextRule(
+                include=True,
+                format=ContextFormat.TEXT,
+                required=True
+            ),
+            "input2": ContextRule(
+                include=True,
+                format=ContextFormat.JSON,
+                max_tokens=100
+            )
+        },
+        format_specifications={
+            "input1": {"prefix": "Input 1: "},
+            "input2": {"indent": 2}
+        }
+    )
+    
+    # Add node
+    script_chain.add_node(node)
+    
+    # Verify node was added with context rules
+    assert "test_node" in script_chain.nodes
+    assert script_chain.nodes["test_node"].config.context_rules == node.context_rules
+    assert script_chain.nodes["test_node"].config.format_specifications == node.format_specifications
+
+@pytest.mark.asyncio
+async def test_input_validation(script_chain: ScriptChain):
+    """Test input validation with context rules."""
+    # Create test node with required input
+    node = NodeConfig(
+        id="validation_node",
+        type="llm",
+        model="gpt-4",
+        prompt="Test prompt",
+        level=0,
+        context_rules={
+            "required_input": ContextRule(
+                include=True,
+                required=True
+            )
+        }
+    )
+    
+    script_chain.add_node(node)
+    
+    # Test with missing required input
+    result = await script_chain.nodes["validation_node"].validate_inputs({})
+    assert not result
+    
+    # Test with valid input
+    result = await script_chain.nodes["validation_node"].validate_inputs({
+        "required_input": "test value"
+    })
+    assert result
+
+@pytest.mark.asyncio
+async def test_context_formatting(script_chain: ScriptChain):
+    """Test context formatting with different formats."""
+    # Create test node with format specifications
+    node = NodeConfig(
+        id="format_node",
+        type="llm",
+        model="gpt-4",
+        prompt="Test prompt",
+        level=0,
+        context_rules={
+            "text_input": ContextRule(format=ContextFormat.TEXT),
+            "json_input": ContextRule(format=ContextFormat.JSON),
+            "markdown_input": ContextRule(format=ContextFormat.MARKDOWN),
+            "code_input": ContextRule(format=ContextFormat.CODE)
+        }
+    )
+    
+    script_chain.add_node(node)
+    
+    # Test different input formats
+    inputs = {
+        "text_input": "plain text",
+        "json_input": {"key": "value"},
+        "markdown_input": "# Heading\nContent",
+        "code_input": "def test(): pass"
+    }
+    
+    # Verify formatting
+    formatted = await script_chain.nodes["format_node"].prepare_prompt(inputs)
+    assert "plain text" in formatted
+    assert '"key": "value"' in formatted
+    assert "# Heading" in formatted
+    assert "def test(): pass" in formatted
+
+@pytest.mark.asyncio
+async def test_parallel_execution_with_context(script_chain: ScriptChain):
+    """Test parallel execution with context management."""
+    # Add nodes at the same level with context dependencies
+    node1 = NodeConfig(
+        id="node1",
+        type="llm",
+        model="gpt-4",
+        prompt="Test prompt 1",
+        level=0
+    )
+    node2 = NodeConfig(
+        id="node2",
+        type="llm",
+        model="gpt-4",
+        prompt="Test prompt 2 with {node1_output}",
+        level=0,
+        context_rules={
+            "node1_output": ContextRule(
+                include=True,
+                format=ContextFormat.TEXT
+            )
+        }
+    )
+    
+    script_chain.add_node(node1)
+    script_chain.add_node(node2)
+    
+    # Mock execution results
+    async def mock_execute(*args, **kwargs):
+        node_id = args[1]
+        if node_id == "node1":
+            return NodeExecutionResult(
+                success=True,
+                output="node1 output",
+                metadata=NodeMetadata(
+                    node_id=node_id,
+                    node_type="llm",
+                    version="1.0.0"
+                )
+            )
+        else:
+            return NodeExecutionResult(
+                success=True,
+                output="node2 output",
+                metadata=NodeMetadata(
+                    node_id=node_id,
+                    node_type="llm",
+                    version="1.0.0"
+                )
+            )
+    
+    script_chain.execute_node = mock_execute
+    
+    # Execute
+    result = await script_chain.execute()
+    
+    # Verify execution and context
+    assert result.success
+    assert result.output is not None
+    assert len(result.output) == 2
+    assert "node1" in result.output
+    assert "node2" in result.output 

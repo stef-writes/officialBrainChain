@@ -1,256 +1,110 @@
 # Gaffer
 
-A Python-based workflow orchestration system that provides a flexible framework for building and executing directed acyclic graphs (DAGs) of text generation nodes.
+A powerful workflow orchestration engine for AI-powered applications.
 
 ## Core Components
 
 ### ScriptChain
+The ScriptChain is the core orchestration engine that manages the execution of AI workflows. It provides:
 
-The primary orchestration engine that manages workflow execution and node dependencies.
-
-#### Key Features
 - Level-based parallel execution
-- Context management with token tracking
-- Configurable LLM integration
-- Vector store integration for context retrieval
-- Workflow validation for orphan nodes and disconnected components
+- Robust context management
+- Input validation and formatting
+- Error handling and recovery
+- Callback integration for monitoring
 
-#### Configuration
+### Node System
+The node system consists of specialized nodes that handle different aspects of AI processing:
+
+- `TextGenerationNode`: Handles text generation with LLMs
+  - Async execution
+  - Context-aware prompting
+  - Input validation
+  - Format-specific handling (Text, JSON, Markdown, Code)
+  - Token usage tracking
+
+### Context Management
+The context management system provides:
+
+- Vector store integration for semantic search
+- Context window management
+- Format-specific context rules
+- Input validation and transformation
+- Token usage optimization
+
+### Workflow Execution
+The workflow execution system features:
+
+- Level-based processing
+- Parallel execution within levels
+- Context propagation
+- Error handling and recovery
+- Execution monitoring
+
+## Configuration
+
+### LLM Configuration
 ```python
 llm_config = LLMConfig(
     model="gpt-4",
     api_key="your-api-key",
     temperature=0.7,
-    max_tokens=1000,
+    max_tokens=500,
     max_context_tokens=1000
 )
-
-script_chain = ScriptChain(
-    llm_config=llm_config,
-    vector_store=vector_store  # Optional
-)
 ```
 
-### Node System
-
-#### TextGenerationNode
-- Primary node type for text generation
-- Supports async execution
-- Integrates with OpenAI's GPT models
-- Handles context window management
-- Token usage tracking
-
-#### Node Configuration
+### Node Configuration
 ```python
 node_config = NodeConfig(
-    node_id="unique_id",
-    prompt_template="Your prompt template",
-    dependencies=["dependency1", "dependency2"],
-    max_tokens=1000,
-    temperature=0.7
+    id="node1",
+    type="llm",
+    model="gpt-4",
+    prompt="Your prompt with {input}",
+    level=0,
+    context_rules={
+        "input": ContextRule(
+            include=True,
+            format=ContextFormat.TEXT,
+            required=True
+        )
+    },
+    format_specifications={
+        "input": {"prefix": "Input: "}
+    }
 )
 ```
 
-### Context Management
+## Testing Framework
+The testing framework provides comprehensive coverage of:
 
-#### VectorStore
-- Abstract interface for vector storage
-- Supports similarity search
-- Configurable chunk size and overlap
-- Metadata storage capabilities
-
-#### ContextWindow
-- Manages token limits
-- Handles context truncation
-- Supports metadata tracking
-- Configurable window size
-
-### Workflow Execution
-
-#### Level-based Processing
-1. Nodes are organized into execution levels
-2. Each level executes in parallel
-3. Dependencies are resolved automatically
-4. Results are propagated to dependent nodes
-
-#### Error Handling
-- Graceful failure handling
-- Error propagation
-- Node-level error isolation
-- Execution state preservation
-
-### Testing Framework
-
-#### Test Coverage
-- Unit tests for core components
-- Integration tests for workflow execution
-- Mock implementations for external services
-- Fixture-based test setup
-
-#### Key Test Areas
-- Node initialization
-- Workflow validation
+- Node initialization and configuration
+- Context management and formatting
+- Input validation
 - Parallel execution
 - Error handling
-- Context management
-- Vector store integration
+- Callback integration
 
-## Technical Implementation
+## Getting Started
 
-### Dependencies
-- Python 3.8+
-- langchain
-- langchain-community
-- pydantic
-- pytest
-- pytest-asyncio
-- pytest-cov
-
-### Project Structure
-```
-app/
-├── api/
-│   └── routes.py
-├── chains/
-│   └── script_chain.py
-├── context/
-│   └── vector.py
-├── models/
-│   ├── config.py
-│   ├── node_models.py
-│   └── vector_store.py
-├── nodes/
-│   └── text_generation.py
-├── utils/
-│   ├── callbacks.py
-│   ├── context.py
-│   └── logging.py
-└── vector/
-    └── store.py
-```
-
-### Key Classes and Interfaces
-
-#### ScriptChain
-- Manages workflow execution
-- Handles node dependencies
-- Controls parallel execution
-- Manages context and state
-
-#### TextGenerationNode
-- Executes text generation
-- Manages LLM interactions
-- Handles prompt templating
-- Tracks token usage
-
-#### VectorStore
-- Abstract base class for vector storage
-- Defines interface for similarity search
-- Manages document storage and retrieval
-
-#### ContextWindow
-- Manages token limits
-- Handles context truncation
-- Tracks metadata
-
-### Configuration System
-
-#### LLMConfig
-- Model configuration
-- API settings
-- Token limits
-- Generation parameters
-
-#### NodeConfig
-- Node identification
-- Prompt templates
-- Dependencies
-- Generation parameters
-
-### Error Handling
-
-#### Retry Mechanism
-- Configurable retry attempts
-- Exponential backoff
-- Error type filtering
-- State preservation
-
-#### Error Types
-- ValidationError
-- ExecutionError
-- ContextError
-- VectorStoreError
-
-### Testing Infrastructure
-
-#### Test Fixtures
-- ScriptChain setup
-- Node configuration
-- Vector store mocking
-- Context management
-
-#### Test Categories
-- Initialization tests
-- Execution tests
-- Error handling tests
-- Integration tests
-
-## Development
-
-### Testing
+1. Install dependencies:
 ```bash
-# Run all tests
-python -m pytest
-
-# Run specific test file
-python -m pytest tests/test_script_chain.py
-
-# Run with coverage
-python -m pytest --cov=app tests/
+pip install -r requirements.txt
 ```
 
-### Code Style
-- PEP 8 compliance
-- Type hints
-- Docstring documentation
-- Clear error messages
+2. Configure your environment:
+```bash
+cp .env.example .env
+# Edit .env with your settings
+```
 
-### Error Handling
-- Graceful degradation
-- Detailed error messages
-- State preservation
-- Recovery mechanisms
+3. Run tests:
+```bash
+python -m pytest tests/
+```
 
-## Technical Limitations
+## Contributing
+Contributions are welcome! Please read our contributing guidelines before submitting pull requests.
 
-### Context Management
-- Fixed token limits
-- Context window constraints
-- Metadata storage limits
-
-### Vector Store
-- Abstract interface only
-- No default implementation
-- Requires custom implementation
-
-### Node System
-- Single node type (TextGenerationNode)
-- Fixed dependency model
-- Synchronous execution only
-
-### Error Handling
-- Basic retry mechanism
-- Limited error recovery
-- State preservation constraints
-
-## Future Considerations
-
-### Potential Enhancements
-- Additional node types
-- Enhanced error recovery
-- Extended context management
-- Vector store implementations
-- Async node execution
-- Dynamic workflow modification
-- Enhanced monitoring
-- Performance optimization 
+## License
+This project is licensed under the MIT License - see the LICENSE file for details. 

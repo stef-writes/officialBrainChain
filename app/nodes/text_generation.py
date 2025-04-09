@@ -4,7 +4,7 @@ Concrete node implementations using the data models
 
 import time
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 from openai import AsyncOpenAI, OpenAI
 from openai import APIError, RateLimitError, Timeout
 import logging
@@ -19,13 +19,15 @@ from app.models.node_models import (
     NodeExecutionResult,
     NodeExecutionRecord,
     NodeMetadata,
-    UsageMetadata
+    UsageMetadata,
+    ContextRule
 )
 from app.models.config import LLMConfig, MessageTemplate
 from app.utils.context import GraphContextManager
 from app.nodes.base import BaseNode
 from app.utils.logging import logger
 from app.utils.tracking import track_usage
+from app.utils.callbacks import NodeCallback
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain_core.messages import (
@@ -97,8 +99,9 @@ class TextGenerationNode(BaseNode):
     def __init__(
         self,
         config: NodeConfig,
-        context_manager: Optional[GraphContextManager] = None,
-        llm_config: Optional[LLMConfig] = None
+        context_manager: GraphContextManager,
+        llm_config: LLMConfig,
+        callbacks: Optional[List[NodeCallback]] = None
     ):
         """Initialize text generation node.
         
@@ -106,78 +109,146 @@ class TextGenerationNode(BaseNode):
             config: Node configuration
             context_manager: Optional context manager
             llm_config: Optional LLM configuration
+            callbacks: Optional list of node callbacks
         """
         super().__init__(config)
         self.context_manager = context_manager
-        self.llm_config = llm_config or LLMConfig()
+        self.llm_config = llm_config
+        self.callbacks = callbacks or []
         self.type = "llm"
         
         # Initialize LLM
         self.llm = ChatOpenAI(
-            model_name=self.llm_config.model,
-            temperature=self.llm_config.temperature,
-            max_tokens=self.llm_config.max_tokens
+            model_name=llm_config.model,
+            openai_api_key=llm_config.api_key,
+            temperature=llm_config.temperature,
+            max_tokens=llm_config.max_tokens
         )
         
         logger.debug(
             f"Initialized TextGenerationNode with model={self.llm.model_name}"
         )
     
-    async def execute(self, context: Optional[Dict] = None) -> NodeExecutionResult:
-        """Execute text generation.
+    async def prepare_prompt(self, inputs: Dict[str, Any]) -> str:
+        """Prepare prompt with selected context from inputs"""
+        template = self.config.prompt
+        selected_contexts = {}
         
-        Args:
-            context: Optional execution context
+        # Filter inputs based on selection
+        if self.config.input_selection:
+            selected_contexts = {
+                k: v for k, v in inputs.items() 
+                if k in self.config.input_selection
+            }
+        else:
+            selected_contexts = inputs
             
-        Returns:
-            NodeExecutionResult containing generated text and metadata
-        """
-        start_time = datetime.utcnow()
+        # Apply context rules and format inputs
+        formatted_inputs = {}
+        for input_id, context in selected_contexts.items():
+            rule = self.config.context_rules.get(input_id)
+            if rule and rule.include:
+                formatted_inputs[input_id] = self.context_manager.format_context(
+                    context,
+                    rule,
+                    self.config.format_specifications.get(input_id)
+                )
+            elif not rule or rule.include:
+                formatted_inputs[input_id] = context
+
+        # Replace placeholders in template
+        for input_id, content in formatted_inputs.items():
+            placeholder = f"{{{input_id}}}"
+            if placeholder in template:
+                template = template.replace(placeholder, str(content))
+
+        return template
+
+    async def execute(self, inputs: Optional[Dict[str, Any]] = None) -> NodeExecutionResult:
+        """Execute the node with the given inputs"""
+        start_time = time.time()
+        inputs = inputs or {}
+        
         try:
-            # Prepare messages
-            messages = self._prepare_messages(context)
+            # Prepare prompt with context
+            prompt = await self.prepare_prompt(inputs)
             
-            # Generate text
+            # Create messages
+            messages = [
+                SystemMessage(content="You are a helpful AI assistant."),
+                HumanMessage(content=prompt)
+            ]
+            
+            # Execute LLM
             response = await self.llm.agenerate([messages])
-            generation = response.generations[0][0]
             
-            # Extract usage statistics
-            usage = response.llm_output.get("token_usage", {})
+            # Process response
+            output = response.generations[0][0].text
             
-            return NodeExecutionResult(
+            # Calculate execution time
+            execution_time = time.time() - start_time
+            
+            # Create result
+            result = NodeExecutionResult(
                 success=True,
-                output={"text": generation.text},
+                output=output,
                 metadata=NodeMetadata(
                     node_id=self.config.id,
                     node_type=self.type,
-                    start_time=start_time,
-                    end_time=datetime.utcnow()
+                    version="1.0.0"
                 ),
                 usage=UsageMetadata(
-                    prompt_tokens=usage.get("prompt_tokens", 0),
-                    completion_tokens=usage.get("completion_tokens", 0),
-                    total_tokens=usage.get("total_tokens", 0),
-                    cost=self._calculate_cost(usage),
-                    model=self.llm.model_name,
-                    node_id=self.config.id
-                )
+                    prompt_tokens=response.llm_output.get('token_usage', {}).get('prompt_tokens', 0),
+                    completion_tokens=response.llm_output.get('token_usage', {}).get('completion_tokens', 0),
+                    total_tokens=response.llm_output.get('token_usage', {}).get('total_tokens', 0)
+                ),
+                execution_time=execution_time,
+                context_used=inputs
             )
             
+            # Update context
+            self.context_manager.update_context(self.config.id, output)
+            
+            # Call callbacks
+            for callback in self.callbacks:
+                await callback.on_node_complete(self.config.id, result)
+            
+            return result
+            
         except Exception as e:
-            logger.error(f"Text generation failed: {str(e)}")
-            return NodeExecutionResult(
+            logger.error(f"Error executing node {self.config.id}: {str(e)}")
+            
+            # Create error result
+            result = NodeExecutionResult(
                 success=False,
                 error=str(e),
                 metadata=NodeMetadata(
                     node_id=self.config.id,
                     node_type=self.type,
-                    start_time=start_time,
-                    end_time=datetime.utcnow(),
-                    error_type=e.__class__.__name__,
-                    error_traceback=traceback.format_exc()
-                )
+                    version="1.0.0"
+                ),
+                execution_time=time.time() - start_time
             )
-    
+            
+            # Call error callbacks
+            for callback in self.callbacks:
+                await callback.on_node_error(self.config.id, e)
+            
+            return result
+
+    def validate_inputs(self, inputs: Dict[str, Any]) -> bool:
+        """Validate inputs against context rules"""
+        for input_id, rule in self.config.context_rules.items():
+            if rule.required and input_id not in inputs:
+                logger.error(f"Required input {input_id} not provided")
+                return False
+                
+            if input_id in inputs and rule.max_tokens:
+                # Implement token counting logic here
+                pass
+                
+        return True
+
     def _prepare_messages(self, context: Optional[Dict] = None) -> List:
         """Prepare messages for LLM.
         

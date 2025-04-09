@@ -6,6 +6,26 @@ from typing import Dict, List, Optional, Union, Any
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, validator
 from datetime import datetime
 from .config import LLMConfig, MessageTemplate  # Import MessageTemplate
+from enum import Enum
+
+class ContextFormat(str, Enum):
+    TEXT = "text"
+    JSON = "json"
+    MARKDOWN = "markdown"
+    CODE = "code"
+    CUSTOM = "custom"
+
+class ContextRule(BaseModel):
+    include: bool = True
+    format: ContextFormat = ContextFormat.TEXT
+    transform: Optional[str] = None  # Optional transformation function name
+    max_tokens: Optional[int] = None
+    required: bool = False
+
+class InputMapping(BaseModel):
+    source_id: str
+    target_key: str
+    rules: ContextRule
 
 class NodeMetadata(BaseModel):
     """Metadata model for node versioning and ownership"""
@@ -47,6 +67,12 @@ class NodeConfig(BaseModel):
     metadata: Optional[NodeMetadata] = None
     input_schema: Dict[str, Any] = Field(default_factory=dict, description="Input schema for the node")
     output_schema: Dict[str, Any] = Field(default_factory=dict, description="Output schema for the node")
+    input_mappings: Dict[str, InputMapping] = Field(default_factory=dict, description="Input mappings for the node")
+    input_selection: Optional[List[str]] = None
+    context_rules: Dict[str, ContextRule] = Field(default_factory=dict, description="Context rules for the node")
+    max_tokens: Optional[int] = None
+    temperature: float = 0.7
+    format_specifications: Dict[str, Any] = Field(default_factory=dict, description="Format specifications for the node")
 
     @field_validator('dependencies')
     @classmethod
@@ -108,6 +134,8 @@ class NodeExecutionResult(BaseModel):
     output: Optional[Dict[str, Any]] = Field(None, description="Output data from the node")
     metadata: NodeMetadata = Field(..., description="Metadata about the execution")
     usage: Optional[UsageMetadata] = Field(None, description="Usage statistics from the execution")
+    execution_time: Optional[float] = Field(None, description="Execution time in seconds")
+    context_used: Optional[Dict[str, Any]] = Field(None, description="Context used for the execution")
 
     class Config:
         arbitrary_types_allowed = True
