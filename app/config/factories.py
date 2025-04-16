@@ -10,9 +10,9 @@ Provides pre-configured node setups for different use cases with:
 
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from app.models.nodes import NodeConfig, NodeMetadata
+from app.models.node_models import NodeConfig, NodeMetadata
 from app.models.config import LLMConfig, MessageTemplate
-from app.utils.context import ContextManager, GraphContextManager
+from app.utils.context import GraphContextManager
 
 @dataclass
 class TextGenPreset:
@@ -29,16 +29,18 @@ class TextGenerationConfigFactory:
     """Factory for creating pre-configured text generation nodes"""
     
     @staticmethod
-    def create_from_preset(preset: TextGenPreset, context_manager: ContextManager) -> Dict[str, Any]:
+    def create_from_preset(preset: TextGenPreset, context_manager: GraphContextManager) -> Dict[str, Any]:
         """Create full node configuration from preset"""
         return {
             "config": NodeConfig(
                 metadata=preset.metadata,
                 llm_config=preset.llm_config,
+                templates=preset.templates,
                 input_schema=preset.input_schema,
                 output_schema=preset.output_schema,
-                templates=list(preset.templates.values()),
-                timeout=preset.timeout
+                timeout=preset.timeout,
+                model=preset.llm_config.model,
+                prompt=""
             ),
             "llm_config": preset.llm_config,
             "context_manager": context_manager

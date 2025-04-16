@@ -1,7 +1,3 @@
-"""
-Enhanced workflow orchestration system with level-based parallel execution and robust context management
-"""
-
 from datetime import datetime
 import networkx as nx
 from typing import Dict, List, Optional, Any, Union, Set, Tuple
@@ -43,7 +39,6 @@ class ScriptChain:
         """Initialize the script chain with enhanced configuration"""
         self.chain_id = f"chain_{uuid4().hex[:8]}"
         self.graph = nx.DiGraph()
-        self.nodes = {}  # For backward compatibility
         self.dependencies = {}  # Map of node_id to list of dependencies
         self.execution_levels = {}  # Map of level to ExecutionLevel
         self.node_registry: Dict[str, BaseNode] = {}
@@ -78,7 +73,7 @@ class ScriptChain:
         self.context = GraphContextManager(
             max_tokens=max_context_tokens,
             graph=self.graph,
-            vector_store_config=vector_store_config
+            vector_store=self.vector_store
         )
         
         # Execution configuration
@@ -111,7 +106,7 @@ class ScriptChain:
         Raises:
             ValueError: If node ID already exists
         """
-        if node_config.id in self.nodes:
+        if node_config.id in self.node_registry:
             raise ValueError(f"Node with ID {node_config.id} already exists")
         
         # Ensure metadata is set
@@ -130,7 +125,6 @@ class ScriptChain:
             llm_config=self.llm_config
         )
         
-        self.nodes[node_config.id] = node
         self.dependencies[node_config.id] = set(node_config.dependencies)
         
         self.node_registry[node_config.id] = node
@@ -171,7 +165,7 @@ class ScriptChain:
         """
         # Check for orphan nodes
         orphan_nodes = []
-        for node_id in self.nodes:
+        for node_id in self.node_registry:
             if not self.graph.in_degree(node_id) and not self.graph.out_degree(node_id):
                 orphan_nodes.append(node_id)
         
@@ -318,8 +312,48 @@ class ScriptChain:
         
         async def process_node(node_id: str) -> Tuple[str, NodeExecutionResult]:
             async with semaphore:
+                node_start_time = datetime.utcnow()
+                max_retries = 3
+
                 try:
                     node = self.node_registry[node_id]
+                    if not hasattr(node, 'execute'):
+                        logger.error(f"Node {node_id} does not have execute method")
+                        return node_id, NodeExecutionResult(
+                            success=False,
+                            error=f"Node {node_id} is not properly initialized or lacks execute method",
+                            metadata=NodeMetadata(
+                                node_id=node_id,
+                                node_type=getattr(node, 'type', 'unknown'),
+                                start_time=node_start_time,
+                                end_time=datetime.utcnow(),
+                                error_type="InvalidNodeError"
+                            )
+                        )
+
+                    node_context_data = await self.context.get_context(node_id)
+                    node_context = node_context_data or {}
+
+                    result = await self.execute_node(node_id, node_context=node_context, max_retries=max_retries)
+
+                    if result.success:
+                        self.context.update_context(node_id, result)
+                        self._update_metrics(node_id, result)
+
+                        await self._trigger_callbacks('node_end', NodeExecutionResult(
+                            success=True,
+                            output={
+                                'node_id': node_id,
+                                'result': result.model_dump(),
+                                'level': level.level
+                            },
+                            metadata=result.metadata
+                        ))
+                        return node_id, result
+                    else:
+                        await self._trigger_callbacks('node_error', result)
+                        return node_id, result
+
                 except KeyError:
                     return node_id, NodeExecutionResult(
                         success=False,
@@ -327,100 +361,38 @@ class ScriptChain:
                         metadata=NodeMetadata(
                             node_id=node_id,
                             node_type="unknown",
+                            start_time=node_start_time,
+                            end_time=datetime.utcnow(),
                             error_type="NodeNotFoundError"
                         )
                     )
-                
-                if not hasattr(node, 'execute'):
-                    logger.error(f"Node {node_id} does not have execute method")
-                    return node_id, NodeExecutionResult(
+                except Exception as e:
+                    logger.error(f"Unexpected error processing node {node_id} wrapper: {str(e)}", exc_info=True)
+                    node_type = "unknown"
+                    try:
+                        if node_id in self.node_registry:
+                            node_type = getattr(self.node_registry[node_id], 'type', 'unknown')
+                    except Exception:
+                        pass
+
+                    error_result = NodeExecutionResult(
                         success=False,
-                        error=f"Node {node_id} is not properly initialized",
+                        error=f"Unexpected error in chain processing for node {node_id}: {str(e)}",
                         metadata=NodeMetadata(
                             node_id=node_id,
-                            node_type="unknown",
-                            error_type="InvalidNodeError"
+                            node_type=node_type,
+                            start_time=node_start_time,
+                            end_time=datetime.utcnow(),
+                            error_type=e.__class__.__name__,
+                            error_traceback=traceback.format_exc()
                         )
                     )
-                
-                node_start_time = datetime.utcnow()
-                attempt = 0
-                max_retries = 3
-                
-                # Get context for this node
-                node_context = self.context.get_node_context(node_id)
-                
-                while attempt < max_retries:
-                    try:
-                        # Pass context to the node's execute method
-                        result = await node.execute(node_context)
-                        
-                        if result.success:
-                            # Update context and metrics
-                            self.context.update_context(node_id, result)
-                            self._update_metrics(node_id, result)
-                            
-                            await self._trigger_callbacks('node_end', NodeExecutionResult(
-                                success=True,
-                                output={
-                                    'node_id': node_id,
-                                    'result': result.model_dump(),
-                                    'level': level.level
-                                },
-                                metadata=NodeMetadata(
-                                    node_id=node_id,
-                                    node_type=node.type if hasattr(node, 'type') else "unknown",
-                                    start_time=node_start_time,
-                                    end_time=datetime.utcnow()
-                                )
-                            ))
-                            
-                            return node_id, result
-                        
-                        attempt += 1
-                        if attempt < max_retries:
-                            await asyncio.sleep(1 * attempt)  # Exponential backoff
-                            continue
-                            
-                    except Exception as e:
-                        attempt += 1
-                        if attempt < max_retries:
-                            await asyncio.sleep(1 * attempt)  # Exponential backoff
-                            continue
-                        
-                        error_result = NodeExecutionResult(
-                            success=False,
-                            error=str(e),
-                            metadata=NodeMetadata(
-                                node_id=node_id,
-                                node_type=node.type if hasattr(node, 'type') else "unknown",
-                                start_time=node_start_time,
-                                end_time=datetime.utcnow(),
-                                error_type=e.__class__.__name__,
-                                error_traceback=traceback.format_exc()
-                            )
-                        )
-                        await self._trigger_callbacks('node_error', error_result)
-                        return node_id, error_result
-                
-                # If we get here, we've exhausted all retries
-                error_result = NodeExecutionResult(
-                    success=False,
-                    error=f"Node {node_id} failed after {max_retries} attempts",
-                    metadata=NodeMetadata(
-                        node_id=node_id,
-                        node_type=node.type if hasattr(node, 'type') else "unknown",
-                        start_time=node_start_time,
-                        end_time=datetime.utcnow(),
-                        error_type="MaxRetriesExceeded"
-                    )
-                )
-                await self._trigger_callbacks('node_error', error_result)
-                return node_id, error_result
+                    await self._trigger_callbacks('node_error', error_result)
+                    return node_id, error_result
 
         tasks = [process_node(node_id) for node_id in level.node_ids]
         results = await asyncio.gather(*tasks)
-        results_dict = dict(results)  # Convert list of tuples to dictionary
+        results_dict = dict(results)
         
         return NodeExecutionResult(
             success=all(r.success for r in results_dict.values()),
@@ -489,56 +461,76 @@ class ScriptChain:
             except Exception as e:
                 logger.error(f"Callback error in {callback.__class__.__name__}: {e}")
 
-    async def execute_node(self, node_id: str, max_retries: int = 3) -> NodeExecutionResult:
+    async def execute_node(self, node_id: str, node_context: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> NodeExecutionResult:
         """Execute a single node with retry logic.
         
         Args:
             node_id: ID of the node to execute
+            node_context: The context dictionary for the node execution.
             max_retries: Maximum number of retry attempts
             
         Returns:
             NodeExecutionResult containing the execution result
         """
+        if node_id not in self.node_registry:
+            return NodeExecutionResult(
+                success=False,
+                error=f"Node {node_id} not found in registry",
+                metadata=NodeMetadata(
+                    node_id=node_id,
+                    node_type="unknown",
+                    error_type="NodeNotFoundError"
+                )
+            )
+
         node = self.node_registry[node_id]
         start_time = datetime.utcnow()
         attempt = 0
-        
-        # Get context for this node
-        node_context = self.context.get_node_context(node_id)
-        
+
         while attempt < max_retries:
             try:
-                # Pass context to the node's execute method
                 result = await node.execute(node_context)
                 if result.success:
+                    if result.metadata and result.metadata.start_time is None:
+                        result.metadata.start_time = start_time
+                    if result.metadata and result.metadata.end_time is None:
+                        result.metadata.end_time = datetime.utcnow()
                     return result
+
+                error_reason = result.error or f"Node {node_id} returned success=False"
+                logger.warning(f"Node {node_id} execution attempt {attempt + 1}/{max_retries} returned success=False: {error_reason}")
                 attempt += 1
                 if attempt < max_retries:
-                    await asyncio.sleep(1 * attempt)  # Exponential backoff
+                    await asyncio.sleep(1 * attempt)
+                else:
+                    return result
+
             except Exception as e:
                 logger.error(f"Node {node_id} execution failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
                 attempt += 1
                 if attempt < max_retries:
-                    await asyncio.sleep(1 * attempt)  # Exponential backoff
+                    await asyncio.sleep(1 * attempt)
                 else:
+                    error_traceback = traceback.format_exc()
                     return NodeExecutionResult(
                         success=False,
                         error=str(e),
                         metadata=NodeMetadata(
                             node_id=node_id,
-                            node_type=node.type,
+                            node_type=getattr(node, 'type', 'unknown'),
                             start_time=start_time,
                             end_time=datetime.utcnow(),
-                            error_type=e.__class__.__name__
+                            error_type=e.__class__.__name__,
+                            error_traceback=error_traceback
                         )
                     )
 
         return NodeExecutionResult(
             success=False,
-            error=f"Node {node_id} failed after {max_retries} attempts",
+            error=f"Node {node_id} failed after {max_retries} attempts (reached end of retry loop)",
             metadata=NodeMetadata(
                 node_id=node_id,
-                node_type=node.type,
+                node_type=getattr(node, 'type', 'unknown'),
                 start_time=start_time,
                 end_time=datetime.utcnow(),
                 error_type="MaxRetriesExceeded"
@@ -560,19 +552,22 @@ class ScriptChain:
             visited.add(node_id)
             component.add(node_id)
             
-            # Check dependencies
-            node = self.nodes.get(node_id)
-            if node and node.dependencies:
-                for dep in node.dependencies:
-                    dfs(dep, component)
-                    
-            # Check nodes that depend on this one
-            for other_id, other_node in self.nodes.items():
-                if node_id in other_node.dependencies:
+            # Check dependencies using node_registry
+            node = self.node_registry.get(node_id)
+            if node and hasattr(node, 'config') and node.config.dependencies:
+                for dep in node.config.dependencies:
+                    # Ensure dependency exists in registry before recursion
+                    if dep in self.node_registry:
+                        dfs(dep, component)
+
+            # Check nodes that depend on this one using node_registry
+            for other_id, other_node in self.node_registry.items():
+                # Check config/dependencies exist before accessing
+                if hasattr(other_node, 'config') and node_id in other_node.config.dependencies:
                     dfs(other_id, component)
         
-        # Find all components
-        for node_id in self.nodes:
+        # Find all components by iterating node_registry
+        for node_id in self.node_registry:
             if node_id not in visited:
                 component = set()
                 dfs(node_id, component)

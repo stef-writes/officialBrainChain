@@ -26,14 +26,15 @@ from app.models.config import LLMConfig, MessageTemplate
 from app.utils.context import GraphContextManager
 from app.nodes.base import BaseNode
 from app.utils.logging import logger
-from app.utils.tracking import track_usage
+from app.utils.tracking import calculate_cost
 from app.utils.callbacks import ScriptChainCallback
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
-    AIMessage
+    AIMessage,
+    BaseMessage
 )
 
 logger = logging.getLogger(__name__)
@@ -130,168 +131,153 @@ class TextGenerationNode(BaseNode):
             f"Initialized TextGenerationNode with model={self.llm.model_name}"
         )
     
-    async def prepare_prompt(self, inputs: Dict[str, Any]) -> str:
-        """Prepare prompt with selected context from inputs"""
-        template = self.config.prompt or ""
-        formatted_parts = []
-        
-        # Filter inputs based on selection
-        selected_contexts = (
-            {k: v for k, v in inputs.items() if k in self.config.input_selection}
-            if self.config.input_selection
-            else inputs
-        )
-            
-        # Apply context rules and format inputs
-        for input_id, context in selected_contexts.items():
-            rule = self.config.context_rules.get(input_id)
-            if rule and rule.include:
-                formatted = self.context_manager.format_context(
-                    context,
-                    rule,
-                    self.config.format_specifications.get(input_id)
-                )
-                formatted_parts.append(f"{input_id}: {formatted}")
-            elif not rule or rule.include:
-                formatted_parts.append(f"{input_id}: {context}")
-
-        # Combine formatted parts
-        formatted_context = "\n".join(formatted_parts)
-        
-        # If template has placeholders, replace them
-        if "{" in template and "}" in template:
-            for input_id, context in selected_contexts.items():
-                placeholder = f"{{{input_id}}}"
-                if placeholder in template:
-                    template = template.replace(placeholder, str(context))
-            return template
-        
-        # If no template or no placeholders, return formatted context
-        return formatted_context if formatted_parts else template
-
     async def execute(self, inputs: Optional[Dict[str, Any]] = None) -> NodeExecutionResult:
-        """Execute the node with the given inputs"""
+        """Execute the node using configured templates and track usage/cost."""
         start_time = time.time()
         inputs = inputs or {}
-        
+        node_start_metadata = self.metadata # Capture initial metadata
+
+        # Note: context passed to _build_messages might need refinement depending
+        # on how conversation history or other context is managed.
+        # For now, using inputs for template formatting.
+        context_for_formatting = inputs 
+
         try:
-            # Prepare prompt with context
-            prompt = await self.prepare_prompt(inputs)
-            
-            # Create messages
-            messages = [
-                SystemMessage(content="You are a helpful AI assistant."),
-                HumanMessage(content=prompt)
-            ]
-            
-            # Execute LLM
-            response = await self.llm.agenerate([messages])
+            # Build messages using templates from config
+            # Pass only inputs for formatting for now.
+            message_dicts = self._build_messages(inputs=inputs, context={}) 
+
+            # Convert dicts to LangChain BaseMessage objects
+            lc_messages: List[BaseMessage] = []
+            for msg in message_dicts:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role == "system":
+                    lc_messages.append(SystemMessage(content=content))
+                elif role == "user":
+                    lc_messages.append(HumanMessage(content=content))
+                elif role == "assistant":
+                    lc_messages.append(AIMessage(content=content))
+                else:
+                    logger.warning(f"Unknown message role '{role}' encountered in node {self.node_id}")
+                    # Fallback to human message for unknown roles
+                    lc_messages.append(HumanMessage(content=content))
+
+            if not lc_messages:
+                 raise ValueError("No messages were generated for LLM call.")
+
+            # Execute LLM call
+            # Note: Ensure self.llm.agenerate expects List[List[BaseMessage]]
+            # If it expects just List[BaseMessage], remove the outer list brackets.
+            # Based on previous read, it likely wants List[List[...]] for batching,
+            # so we wrap our single message list in another list.
+            response = await self.llm.agenerate([lc_messages])
             
             # Process response
+            # Assuming the first result in the first generation is the one we want
+            if not response.generations or not response.generations[0]:
+                 raise ValueError("LLM response did not contain expected generations.")
+            
             output = response.generations[0][0].text
+            llm_output_data = response.llm_output or {}
+            token_usage = llm_output_data.get("token_usage", {})
             
             # Calculate execution time
-            execution_time = time.time() - start_time
+            end_time = time.time()
+            execution_time = end_time - start_time
+
+            # Calculate cost
+            prompt_tokens = token_usage.get("prompt_tokens", 0)
+            completion_tokens = token_usage.get("completion_tokens", 0)
+            total_tokens = token_usage.get("total_tokens", 0)
             
-            # Create result
-            result = NodeExecutionResult(
-                success=True,
-                output=output,
-                metadata=self.metadata,
-                usage=UsageMetadata(
-                    start_time=datetime.fromtimestamp(start_time),
-                    end_time=datetime.fromtimestamp(time.time()),
-                    execution_time=execution_time,
-                    tokens_used=response.llm_output.get("token_usage", {}).get("total_tokens", 0)
-                )
+            # Ensure total_tokens is consistent if possible, otherwise use sum
+            if total_tokens == 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                 total_tokens = prompt_tokens + completion_tokens # Recalculate if total is missing
+
+            # Call the imported calculate_cost function
+            cost = calculate_cost(
+                model_name=self.llm.model_name, # Pass the model name
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens
             )
             
+            # Create usage metadata
+            usage_meta = UsageMetadata(
+                node_id=self.node_id, # Add node_id
+                model=self.llm.model_name, # Add model name
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                cost=cost,
+                # api_calls: Assuming 1 call per execute for now
+            )
+            
+            # Update NodeMetadata with execution details
+            node_end_metadata = node_start_metadata.model_copy(update={
+                 'start_time': datetime.fromtimestamp(start_time),
+                 'end_time': datetime.fromtimestamp(end_time),
+                 'duration': execution_time,
+                 'timestamp': datetime.fromtimestamp(end_time) # Update timestamp to end time
+            })
+
+            # Create successful result
+            result = NodeExecutionResult(
+                success=True,
+                output={"result": output}, # Wrap output in a dict consistently?
+                metadata=node_end_metadata,
+                usage=usage_meta,
+                execution_time=execution_time,
+                context_used=inputs # Store inputs as context used for now
+            )
+            
+            # Call post_execute hook from base class
             return await self.post_execute(result)
             
         except Exception as e:
-            error_msg = OpenAIErrorHandler.format_error_message(e)
+            end_time = time.time()
+            execution_time = end_time - start_time
+            error_msg = self._format_error(e) # Use the helper
             logger.error(f"Error executing node {self.node_id}: {error_msg}")
             logger.debug(traceback.format_exc())
             
+            # Update NodeMetadata with error details
+            node_error_metadata = node_start_metadata.model_copy(update={
+                 'start_time': datetime.fromtimestamp(start_time),
+                 'end_time': datetime.fromtimestamp(end_time),
+                 'duration': execution_time,
+                 'timestamp': datetime.fromtimestamp(end_time),
+                 'error_type': e.__class__.__name__
+            })
+
+            # Create error result
             return NodeExecutionResult(
                 success=False,
                 error=error_msg,
-                metadata=self.metadata,
-                usage=UsageMetadata(
-                    start_time=datetime.fromtimestamp(start_time),
-                    end_time=datetime.fromtimestamp(time.time()),
-                    execution_time=time.time() - start_time,
-                    tokens_used=0
-                )
+                metadata=node_error_metadata,
+                usage=None, # No usage data on error
+                execution_time=execution_time,
+                context_used=inputs
             )
 
-    async def validate_inputs(self, inputs: Dict[str, Any]) -> bool:
-        """Validate inputs against context rules"""
+    async def validate_input(self, context: Dict[str, Any]) -> bool:
+        """Validate execution context against node requirements."""
+        # context here is the dictionary passed by ScriptChain or BaseNode.pre_execute
+        # Use context for validation checks
         for input_id, rule in self.config.context_rules.items():
-            if rule.required and input_id not in inputs:
-                logger.error(f"Required input {input_id} not provided")
+            if rule.required and input_id not in context:
+                logger.error(f"Node {self.node_id}: Required input '{input_id}' not found in context")
                 return False
                 
-            if input_id in inputs and rule.max_tokens:
-                # Implement token counting logic here
-                pass
+            if input_id in context and rule.max_tokens:
+                # TODO: Implement token counting logic for specific input fields if needed
+                # This requires a tokenizer compatible with the model
+                logger.warning(f"Node {self.node_id}: max_tokens validation for input '{input_id}' not yet implemented.")
+                pass # Placeholder for token counting
                 
+        # Add any other necessary validation based on self.config.input_schema etc.
+        logger.debug(f"Node {self.node_id}: Input validation passed.")
         return True
-
-    def _prepare_messages(self, context: Optional[Dict] = None) -> List:
-        """Prepare messages for LLM.
-        
-        Args:
-            context: Optional context dictionary
-            
-        Returns:
-            List of messages for the LLM
-        """
-        messages = []
-        
-        # Add system message if present
-        if self.config.system_message:
-            messages.append(SystemMessage(content=self.config.system_message))
-            
-        # Add context if present
-        if context and context.get("messages"):
-            for msg in context["messages"]:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    messages.append(AIMessage(content=msg["content"]))
-                    
-        # Add prompt
-        if self.config.prompt:
-            messages.append(HumanMessage(content=self.config.prompt))
-            
-        return messages
-    
-    def _calculate_cost(self, usage: Dict[str, int]) -> float:
-        """Calculate cost based on token usage.
-        
-        Args:
-            usage: Token usage dictionary
-            
-        Returns:
-            Estimated cost in USD
-        """
-        # Cost per 1K tokens (approximate)
-        costs = {
-            "gpt-4": {"prompt": 0.03, "completion": 0.06},
-            "gpt-3.5-turbo": {"prompt": 0.002, "completion": 0.002}
-        }
-        
-        model_costs = costs.get(self.llm.model_name, {"prompt": 0, "completion": 0})
-        
-        prompt_cost = (
-            usage.get("prompt_tokens", 0) * model_costs["prompt"] / 1000
-        )
-        completion_cost = (
-            usage.get("completion_tokens", 0) * model_costs["completion"] / 1000
-        )
-        
-        return prompt_cost + completion_cost
 
     @property
     def input_keys(self) -> List[str]:
@@ -303,96 +289,58 @@ class TextGenerationNode(BaseNode):
         """Get list of output keys from schema"""
         return list(self.config.output_schema.keys())
 
-    def get_template(self, role: str) -> MessageTemplate:
-        """Get a template by role.
-        
-        Args:
-            role: The role of the template to retrieve
-            
-        Returns:
-            The matching MessageTemplate
-            
-        Raises:
-            ValueError: If no template is found for the given role
-        """
-        try:
-            return next(t for t in self.templates if t.role == role)
-        except StopIteration:
-            raise ValueError(f"No template found for role: {role}")
+    def get_template(self, role: str) -> Optional[MessageTemplate]:
+        """Get a template by role. Returns None if not found."""
+        # Assumes self.config.templates is the Dict[str, MessageTemplate]
+        return self.config.templates.get(role)
 
     def _build_messages(self, inputs: Dict, context: Dict) -> List[Dict]:
-        """Construct messages with templates"""
+        """Construct messages using templates defined in NodeConfig."""
         messages = []
-        
+        # Combine inputs and context for template formatting
+        # Prioritize inputs over context in case of key collision
+        format_args = {**context, **inputs} 
+
         # Add system message if template exists
-        try:
-            system_template = self.get_template('system')
-            # Combine inputs and context for template formatting
-            format_args = {**inputs, **context}
-            messages.append({
-                "role": "system",
-                "content": system_template.content.format(**format_args)
-            })
-        except ValueError:
-            # No system template, continue without it
-            pass
-            
+        system_template = self.get_template('system')
+        if system_template:
+            try:
+                content = system_template.content.format(**format_args)
+                messages.append({"role": "system", "content": content})
+            except KeyError as e:
+                logger.warning(f"Node {self.node_id}: Missing key '{e}' for system template. Skipping.")
+        else:
+             # Optionally add a default system message if none is provided?
+             # Or rely on the user template to carry the main instruction. Let's omit default for now.
+             pass
+
         # Add user message
-        try:
-            user_template = self.get_template('user')
-            # Combine inputs and context for template formatting
-            format_args = {**inputs, **context}
-            messages.append({
-                "role": "user",
-                "content": user_template.content.format(**format_args)
-            })
-        except ValueError:
-            # Fall back to direct prompt if no user template
-            messages.append({
-                "role": "user",
-                "content": inputs.get("query", inputs.get("prompt", ""))
-            })
+        user_template = self.get_template('user')
+        if user_template:
+            try:
+                content = user_template.content.format(**format_args)
+                messages.append({"role": "user", "content": content})
+            except KeyError as e:
+                logger.error(f"Node {self.node_id}: Missing key '{e}' for user template. Cannot proceed.")
+                raise ValueError(f"Missing required key '{e}' for user template in node {self.node_id}") from e
+        else:
+            # Fallback if no user template? This might be an error condition.
+            # Let's raise an error if no user template is defined, as it's usually essential.
+            logger.error(f"Node {self.node_id}: No user template defined in NodeConfig.templates.")
+            raise ValueError(f"User template not found for node {self.node_id}")
             
+        # Add assistant message template if needed (e.g., for few-shot)
+        assistant_template = self.get_template('assistant')
+        if assistant_template:
+             try:
+                 content = assistant_template.content.format(**format_args)
+                 messages.append({"role": "assistant", "content": content})
+             except KeyError as e:
+                 logger.warning(f"Node {self.node_id}: Missing key '{e}' for assistant template. Skipping.")
+
+        logger.debug(f"Node {self.node_id}: Built messages: {messages}")
         return messages
 
-    def _process_response(self, response: Dict) -> Tuple[str, Dict]:
-        """Extract and validate response content"""
-        if not response.choices:
-            raise ValueError("Empty response from API")
-        
-        content = response.choices[0].message.content
-        usage = {
-            "prompt_tokens": int(response.usage.prompt_tokens),
-            "completion_tokens": int(response.usage.completion_tokens),
-            "total_tokens": int(response.usage.total_tokens)
-        }
-        
-        if not content.strip():
-            raise ValueError("Empty content in response")
-        
-        return content.strip(), usage
-
     def _format_error(self, error: Exception) -> str:
-        """Create user-friendly error messages"""
+        """Create user-friendly error messages using the handler."""
         return OpenAIErrorHandler.format_error_message(error)
-
-    def _update_execution_stats(self, result: NodeExecutionResult):
-        """Update node execution statistics"""
-        self.execution_record.executions += 1
-        
-        if result.success:
-            self.execution_record.successes += 1
-            tokens = result.metadata.get("total_tokens", 0)
-            self.execution_record.token_usage[self.config.llm_config.model] = \
-                self.execution_record.token_usage.get(self.config.llm_config.model, 0) + tokens
-        else:
-            self.execution_record.failures += 1
-        
-        # Update average duration (fixed calculation)
-        self.execution_record.avg_duration = (
-            (self.execution_record.avg_duration * (self.execution_record.executions - 1) 
-            + result.duration) 
-            / self.execution_record.executions
-        )
-        
-        self.execution_record.last_executed = datetime.utcnow()

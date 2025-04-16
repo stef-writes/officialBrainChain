@@ -1,5 +1,5 @@
 """
-Pinecone vector store implementation
+Pinecone vector store implementation (now includes inference capabilities)
 """
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -22,7 +22,7 @@ from app.vector.base import (
 logger = logging.getLogger(__name__)
 
 class PineconeVectorStore(VectorStoreInterface):
-    """Vector store implementation using Pinecone"""
+    """Vector store implementation using Pinecone (handles both direct vector ops and text inference ops)"""
     
     def __init__(self, config: VectorStoreConfig):
         """Initialize Pinecone vector store.
@@ -280,4 +280,12 @@ class PineconeVectorStore(VectorStoreInterface):
                 "namespaces": stats.namespaces
             }
         except Exception as e:
-            raise VectorStoreError(f"Failed to get stats: {str(e)}") 
+            raise VectorStoreError(f"Failed to get stats: {str(e)}")
+
+    # --- Methods copied from PineconeInferenceVectorStore --- NOW REMOVED
+
+    # Removed add_texts method
+
+    # Removed search_text method
+
+    # --- End of removed methods --- 

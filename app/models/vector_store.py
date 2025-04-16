@@ -17,38 +17,19 @@ class VectorStoreConfig(BaseModel):
     environment: str = Field(..., description="Environment name")
     dimension: int = Field(..., description="Dimension of vectors")
     metric: SimilarityMetric = Field(..., description="Distance metric for similarity search")
-    pod_type: str = Field(..., description="Type of pod")
-    replicas: int = Field(..., description="Number of replicas")
-    use_inference: bool = Field(..., description="Whether to use inference")
-    inference_model: str = Field(..., description="Model to use for inference")
+    pod_type: str = Field(..., description="Type of pod (specific to some providers like Pinecone)")
+    replicas: int = Field(..., description="Number of replicas (specific to some providers)")
     api_key: str = Field(..., description="API key")
     host: Optional[str] = Field(None, description="Host URL for the vector store")
     metadata_config: Dict[str, str] = Field(
         default_factory=dict,
-        description="Metadata field configuration"
+        description="Metadata field configuration (specific to some providers)"
     )
     batch_size: int = Field(100, description="Batch size for operations")
-
-class EmbeddingConfig(BaseModel):
-    """Configuration for embedding operations"""
-    model_name: str = Field(
-        "all-MiniLM-L6-v2",
-        description="Name of the sentence transformer model"
-    )
-    batch_size: int = Field(32, description="Batch size for embedding operations")
-    cache_size: int = Field(1000, description="Size of embedding cache")
-    max_length: Optional[int] = Field(512, description="Maximum sequence length")
-    normalize_embeddings: bool = Field(True, description="Whether to normalize embeddings")
 
 class VectorSearchResult(BaseModel):
     """Result from vector search operation"""
     id: str
     score: float
     metadata: Dict[str, Any]
-    vector: Optional[List[float]] = None
-
-class BatchOperation(BaseModel):
-    """Batch operation for vector store"""
-    vectors: List[List[float]]
-    ids: List[str]
-    metadata: List[Dict[str, Any]] 
+    vector: Optional[List[float]] = None 

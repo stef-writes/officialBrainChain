@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.utils.logging import setup_logger
 from app.models.vector_store import VectorStoreConfig
-from app.vector.pinecone_inference_store import PineconeInferenceVectorStore
+from app.vector.pinecone_store import PineconeVectorStore
 
 # Setup logging
 logger = setup_logger()
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
                 host=os.getenv("PINECONE_HOST")
             )
             
-            app.state.vector_store = PineconeInferenceVectorStore(vector_store_config)
+            app.state.vector_store = PineconeVectorStore(vector_store_config)
             await app.state.vector_store.initialize()
             logger.info("Initialized Pinecone vector store with inference")
         except Exception as e:

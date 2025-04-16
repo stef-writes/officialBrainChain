@@ -1,74 +1,44 @@
 """
-Token tracking and cost calculation utilities
+Centralized cost calculation utility for LLM usage.
 """
 
-import time
-import functools
-from contextlib import contextmanager
-from typing import Dict, Any, Callable, Awaitable, TypeVar, cast
+import logging
+from typing import Dict
 
-T = TypeVar('T')
+logger = logging.getLogger(__name__)
 
-@contextmanager
-def track_token_usage():
-    """Context manager for tracking OpenAI token usage"""
-    class TokenTracker:
-        def __init__(self):
-            self.prompt_tokens = 0
-            self.completion_tokens = 0
-            self.total_cost = 0.0
-            self.start_time = time.time()
-            
-        def update(self, response: Dict):
-            """Update metrics from OpenAI response"""
-            usage = response.get("usage", {})
-            self.prompt_tokens += usage.get("prompt_tokens", 0)
-            self.completion_tokens += usage.get("completion_tokens", 0)
-            self._calculate_cost()
-            
-        def _calculate_cost(self):
-            """Estimate costs based on GPT-4 pricing"""
-            self.total_cost += (self.prompt_tokens/1000)*0.03 + \
-                             (self.completion_tokens/1000)*0.06
-    
-    tracker = TokenTracker()
-    try:
-        yield tracker
-    finally:
-        duration = time.time() - tracker.start_time
-        print(f"Execution took {duration:.2f}s")
-        print(f"Total cost: ${tracker.total_cost:.4f}")
+# Define cost per 1K tokens (approximate) - Consider moving to a config file
+# or a more dynamic pricing provider in the future.
+MODEL_COSTS = {
+    "gpt-4": {"prompt": 0.03, "completion": 0.06},
+    "gpt-4-turbo": {"prompt": 0.01, "completion": 0.03},
+    "gpt-3.5-turbo": {"prompt": 0.0005, "completion": 0.0015},
+    # Add other models as needed
+}
 
-def track_usage(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
-    """
-    Decorator to track token usage for node execution.
-    
-    This decorator centralizes token usage tracking by:
-    1. Capturing the result of the decorated function
-    2. Extracting usage information from the result
-    3. Updating the context manager with the usage data
-    
+def calculate_cost(model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Calculate the estimated cost based on token usage and model name.
+
     Args:
-        func: The async function to decorate
-        
+        model_name: The name of the language model used.
+        prompt_tokens: The number of tokens in the prompt.
+        completion_tokens: The number of tokens in the completion.
+
     Returns:
-        The decorated function
+        The estimated cost in USD.
     """
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        # Get the context manager from the first argument (self)
-        # This assumes the first argument is the node instance
-        node = args[0]
-        ctx = getattr(node, 'context', None)
-        
-        # Execute the original function
-        result = await func(*args, **kwargs)
-        
-        # If we have a context manager and the result has usage data, track it
-        if ctx and hasattr(result, 'usage') and result.usage:
-            # Update the context with usage information
-            ctx.track_usage(result.usage)
-            
-        return result
-    
-    return wrapper
+    model_costs = MODEL_COSTS.get(model_name)
+
+    if model_costs is None:
+        logger.warning(
+            f"Cost calculation not available for model: {model_name}. Returning cost 0.0"
+        )
+        return 0.0
+
+    prompt_cost = (prompt_tokens / 1000) * model_costs.get("prompt", 0)
+    completion_cost = (completion_tokens / 1000) * model_costs.get("completion", 0)
+
+    return prompt_cost + completion_cost
+
+# Removed track_token_usage context manager
+# Removed track_usage decorator
