@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Depends
-from pydantic import BaseModel
-from typing import Dict, List, Optional, Any, Tuple
+from fastapi import APIRouter, HTTPException, status, BackgroundTasks, Depends, Body
+from pydantic import BaseModel, Field, validator
+from typing import Dict, List, Optional, Any, Tuple, Union
 import logging
+import yaml
+import json
 
 from app.chains.script_chain import ScriptChain
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata
@@ -38,6 +40,54 @@ class ChainStatusResponse(BaseModel):
     chain_id: str
     status: str  # "pending", "running", "completed", "failed"
     message: Optional[str] = None
+
+class NodeDefinition(BaseModel):
+    """Node definition for workflow import."""
+    id: str
+    type: str
+    config: Dict[str, Any] = Field(default_factory=dict)
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class EdgeDefinition(BaseModel):
+    """Edge definition for workflow import."""
+    source: str
+    target: str
+    metadata: Optional[Dict[str, Any]] = None
+
+class WorkflowDefinition(BaseModel):
+    """Workflow definition model for importing complete workflows."""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    nodes: List[NodeDefinition]
+    edges: List[EdgeDefinition]
+    llm_config: Optional[LLMConfig] = None
+    vector_store_config: Optional[VectorStoreConfig] = None
+    
+    @validator('nodes')
+    def validate_nodes(cls, nodes):
+        # Ensure node IDs are unique
+        node_ids = [node.id for node in nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("Node IDs must be unique")
+        return nodes
+    
+    @validator('edges')
+    def validate_edges(cls, edges, values):
+        if 'nodes' not in values:
+            return edges
+            
+        # Get all node IDs
+        node_ids = [node.id for node in values['nodes']]
+        
+        # Check that edge source and target exist in nodes
+        for edge in edges:
+            if edge.source not in node_ids:
+                raise ValueError(f"Edge source '{edge.source}' not found in nodes")
+            if edge.target not in node_ids:
+                raise ValueError(f"Edge target '{edge.target}' not found in nodes")
+                
+        return edges
 
 @router.post(
     "/chains",
@@ -280,6 +330,108 @@ async def delete_chain(chain_id: str):
     
     logger.info(f"Chain {chain_id} successfully deleted")
     return None  # No content for successful DELETE
+
+@router.post(
+    "/workflow",
+    summary="Import a complete workflow definition",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Dict[str, str]
+)
+async def import_workflow(
+    workflow: WorkflowDefinition = Body(...),
+):
+    """
+    Imports a complete workflow definition in JSON format.
+    Creates a new chain with all specified nodes and edges.
+    Returns the ID of the created chain.
+    """
+    try:
+        # Create a new chain
+        chain = ScriptChain(
+            llm_config=workflow.llm_config,
+            vector_store_config=workflow.vector_store_config
+        )
+        chain_id = chain.chain_id
+        
+        # Add all nodes first
+        logger.info(f"Adding {len(workflow.nodes)} nodes to chain {chain_id}")
+        for node_def in workflow.nodes:
+            # Convert node definition to NodeConfig
+            node_config = NodeConfig(
+                id=node_def.id,
+                type=node_def.type,
+                config=node_def.config,
+                inputs=node_def.inputs,
+                metadata=node_def.metadata
+            )
+            try:
+                chain.add_node(node_config)
+                logger.debug(f"Added node {node_def.id} to chain {chain_id}")
+            except Exception as e:
+                # Remove the chain if there's an error
+                logger.error(f"Failed to add node {node_def.id} to chain {chain_id}: {e}")
+                raise ValueError(f"Failed to add node {node_def.id}: {str(e)}")
+        
+        # Add all edges
+        logger.info(f"Adding {len(workflow.edges)} edges to chain {chain_id}")
+        for edge in workflow.edges:
+            try:
+                chain.add_edge(edge.source, edge.target, edge.metadata)
+                logger.debug(f"Added edge from {edge.source} to {edge.target}")
+            except Exception as e:
+                logger.error(f"Failed to add edge from {edge.source} to {edge.target}: {e}")
+                raise ValueError(f"Failed to add edge from {edge.source} to {edge.target}: {str(e)}")
+        
+        # Store the chain
+        chains[chain_id] = chain
+        chain_status[chain_id] = "pending"
+        
+        logger.info(f"Successfully imported workflow to chain {chain_id}")
+        return {"chain_id": chain_id}
+        
+    except ValueError as e:
+        logger.warning(f"Invalid workflow definition: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to import workflow: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to import workflow: {str(e)}"
+        )
+
+@router.post(
+    "/workflow/yaml",
+    summary="Import a complete workflow definition from YAML",
+    status_code=status.HTTP_201_CREATED,
+    response_model=Dict[str, str]
+)
+async def import_workflow_yaml(
+    yaml_content: str = Body(..., media_type="text/yaml"),
+):
+    """
+    Imports a complete workflow definition in YAML format.
+    Creates a new chain with all specified nodes and edges.
+    Returns the ID of the created chain.
+    """
+    try:
+        # Parse YAML content to dict
+        workflow_dict = yaml.safe_load(yaml_content)
+        
+        # Convert to WorkflowDefinition
+        workflow = WorkflowDefinition.parse_obj(workflow_dict)
+        
+        # Use the existing JSON workflow importer
+        return await import_workflow(workflow)
+        
+    except yaml.YAMLError as e:
+        logger.warning(f"Invalid YAML format: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid YAML format: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to import YAML workflow: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to import YAML workflow: {str(e)}"
+        )
 
 # TODO: Implement proper authentication/authorization.
 # TODO: Need to add this router to the main FastAPI app instance (e.g., in main.py)
