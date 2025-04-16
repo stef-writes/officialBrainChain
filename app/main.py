@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import router
+from app.api.chain_router import router as chain_router
 from app.utils.logging import setup_logger
 from app.models.vector_store import VectorStoreConfig
 from app.vector.pinecone_store import PineconeVectorStore
@@ -68,4 +68,4 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(router, prefix="/api/v1")
+app.include_router(chain_router, prefix="/api/v1", tags=["Chains"])
