@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chain_router import router as chain_router
+from app.api.config_router import router as config_router
 from app.utils.logging import setup_logger
 from app.models.vector_store import VectorStoreConfig
 from app.vector.pinecone_store import PineconeVectorStore
@@ -68,4 +69,5 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(chain_router, prefix="/api/v1", tags=["Chains"])
+app.include_router(chain_router, prefix="/api/v1/chains", tags=["Chains"])
+app.include_router(config_router, prefix="/api/v1/configs", tags=["Configurations"])

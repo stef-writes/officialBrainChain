@@ -9,6 +9,11 @@ from app.chains.script_chain import ScriptChain
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata
 from app.models.config import LLMConfig
 from app.models.vector_store import VectorStoreConfig
+from app.api.config_router import (
+    get_llm_config_by_id_or_default, 
+    get_vector_store_config_by_id_or_default,
+    ConfigReference
+)
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -26,7 +31,9 @@ chain_status: Dict[str, str] = {}
 
 class ChainCreationRequest(BaseModel):
     """Request model for creating a new chain."""
+    llm_config_id: Optional[str] = None
     llm_config: Optional[LLMConfig] = None
+    vector_store_config_id: Optional[str] = None
     vector_store_config: Optional[VectorStoreConfig] = None
 
 class ChainInfoResponse(BaseModel):
@@ -61,7 +68,9 @@ class WorkflowDefinition(BaseModel):
     description: Optional[str] = None
     nodes: List[NodeDefinition]
     edges: List[EdgeDefinition]
+    llm_config_id: Optional[str] = None
     llm_config: Optional[LLMConfig] = None
+    vector_store_config_id: Optional[str] = None
     vector_store_config: Optional[VectorStoreConfig] = None
     
     @validator('nodes')
@@ -101,13 +110,28 @@ async def create_chain(request: ChainCreationRequest):
     Returns the unique ID of the created chain.
     """
     try:
-        # TODO: Handle max_context_tokens more dynamically if needed
+        # Get LLM config - prioritize direct config, then config_id, then default
+        llm_config = request.llm_config
+        if not llm_config and request.llm_config_id:
+            llm_config = get_llm_config_by_id_or_default(request.llm_config_id)
+        elif not llm_config:
+            llm_config = get_llm_config_by_id_or_default()
+            
+        # Get Vector Store config - prioritize direct config, then config_id, then default
+        vector_store_config = request.vector_store_config
+        if not vector_store_config and request.vector_store_config_id:
+            vector_store_config = get_vector_store_config_by_id_or_default(request.vector_store_config_id)
+        elif not vector_store_config:
+            vector_store_config = get_vector_store_config_by_id_or_default()
+        
+        # Create the chain
         chain = ScriptChain(
-            llm_config=request.llm_config,
-            vector_store_config=request.vector_store_config
+            llm_config=llm_config,
+            vector_store_config=vector_store_config
         )
         chains[chain.chain_id] = chain
         chain_status[chain.chain_id] = "pending"
+        
         logger.info(f"Created new chain with ID: {chain.chain_id}")
         return {"chain_id": chain.chain_id}
     except Exception as e:
@@ -346,10 +370,24 @@ async def import_workflow(
     Returns the ID of the created chain.
     """
     try:
+        # Get LLM config
+        llm_config = workflow.llm_config
+        if not llm_config and workflow.llm_config_id:
+            llm_config = get_llm_config_by_id_or_default(workflow.llm_config_id)
+        elif not llm_config:
+            llm_config = get_llm_config_by_id_or_default()
+            
+        # Get Vector Store config
+        vector_store_config = workflow.vector_store_config
+        if not vector_store_config and workflow.vector_store_config_id:
+            vector_store_config = get_vector_store_config_by_id_or_default(workflow.vector_store_config_id)
+        elif not vector_store_config:
+            vector_store_config = get_vector_store_config_by_id_or_default()
+            
         # Create a new chain
         chain = ScriptChain(
-            llm_config=workflow.llm_config,
-            vector_store_config=workflow.vector_store_config
+            llm_config=llm_config,
+            vector_store_config=vector_store_config
         )
         chain_id = chain.chain_id
         
