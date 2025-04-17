@@ -1,6 +1,4 @@
-"""
-Pinecone vector store implementation (now includes inference capabilities)
-"""
+
 
 from typing import List, Dict, Any, Optional, Tuple
 import pinecone

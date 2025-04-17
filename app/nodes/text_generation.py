@@ -137,15 +137,10 @@ class TextGenerationNode(BaseNode):
         inputs = inputs or {}
         node_start_metadata = self.metadata # Capture initial metadata
 
-        # Note: context passed to _build_messages might need refinement depending
-        # on how conversation history or other context is managed.
-        # For now, using inputs for template formatting.
-        context_for_formatting = inputs 
-
         try:
             # Build messages using templates from config
-            # Pass only inputs for formatting for now.
-            message_dicts = self._build_messages(inputs=inputs, context={}) 
+            # Pass the inputs dictionary as context for template formatting
+            message_dicts = self._build_messages(inputs=inputs, context=inputs) 
 
             # Convert dicts to LangChain BaseMessage objects
             lc_messages: List[BaseMessage] = []
@@ -297,10 +292,23 @@ class TextGenerationNode(BaseNode):
     def _build_messages(self, inputs: Dict, context: Dict) -> List[Dict]:
         """Construct messages using templates defined in NodeConfig."""
         messages = []
+        
         # Combine inputs and context for template formatting
-        # Prioritize inputs over context in case of key collision
-        format_args = {**context, **inputs} 
-
+        # First, extract any dependency outputs from context if they exist
+        dependency_outputs = {}
+        for dep_id, dep_output in context.items():
+            if isinstance(dep_output, dict):
+                # If it's a node output dictionary, flatten it for easier reference in templates
+                # This allows for both node_id.key and direct key access in templates
+                dependency_outputs[dep_id] = dep_output
+                # Also add top-level keys if they don't conflict with existing keys
+                if 'result' in dep_output and dep_id not in inputs:
+                    dependency_outputs[dep_id + '_result'] = dep_output['result']
+        
+        # Build format_args with priority: inputs > dependency_outputs > context
+        # This ensures user-provided inputs take precedence
+        format_args = {**context, **dependency_outputs, **inputs}
+        
         # Add system message if template exists
         system_template = self.get_template('system')
         if system_template:
@@ -309,6 +317,13 @@ class TextGenerationNode(BaseNode):
                 messages.append({"role": "system", "content": content})
             except KeyError as e:
                 logger.warning(f"Node {self.node_id}: Missing key '{e}' for system template. Skipping.")
+                # Try with a more limited set of args if the full set causes KeyError
+                try:
+                    content = system_template.content.format(**inputs)
+                    messages.append({"role": "system", "content": content})
+                    logger.info(f"Node {self.node_id}: Fallback to inputs-only for system template")
+                except KeyError:
+                    logger.warning(f"Node {self.node_id}: System template formatting failed even with fallback")
         else:
              # Optionally add a default system message if none is provided?
              # Or rely on the user template to carry the main instruction. Let's omit default for now.
@@ -337,6 +352,13 @@ class TextGenerationNode(BaseNode):
                  messages.append({"role": "assistant", "content": content})
              except KeyError as e:
                  logger.warning(f"Node {self.node_id}: Missing key '{e}' for assistant template. Skipping.")
+                 # Try with a more limited set of args if the full set causes KeyError
+                 try:
+                     content = assistant_template.content.format(**inputs)
+                     messages.append({"role": "assistant", "content": content})
+                     logger.info(f"Node {self.node_id}: Fallback to inputs-only for assistant template")
+                 except KeyError:
+                     logger.warning(f"Node {self.node_id}: Assistant template formatting failed even with fallback")
 
         logger.debug(f"Node {self.node_id}: Built messages: {messages}")
         return messages

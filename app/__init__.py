@@ -1,6 +1,4 @@
-"""
-Gaffer - AI Workflow Orchestration System
-"""
+
 
 from app.main import app
 from app.chains.script_chain import ScriptChain

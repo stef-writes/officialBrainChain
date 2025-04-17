@@ -331,12 +331,19 @@ class ScriptChain:
                             )
                         )
 
+                    # Get the node's own previous context if it exists 
                     node_context_data = await self.context.get_context(node_id)
+                    
+                    # Prepare the execution context
+                    # This will be enriched with dependency outputs in execute_node
                     node_context = node_context_data or {}
-
+                    
+                    # Now execute the node with all the necessary context
+                    # The execute_node method will handle dependency resolution
                     result = await self.execute_node(node_id, node_context=node_context, max_retries=max_retries)
 
                     if result.success:
+                        # Update the context with this node's result
                         self.context.update_context(node_id, result)
                         self._update_metrics(node_id, result)
 
@@ -390,6 +397,7 @@ class ScriptChain:
                     await self._trigger_callbacks('node_error', error_result)
                     return node_id, error_result
 
+        # Execute all nodes in this level in parallel (respecting concurrency limit)
         tasks = [process_node(node_id) for node_id in level.node_ids]
         results = await asyncio.gather(*tasks)
         results_dict = dict(results)
@@ -484,17 +492,60 @@ class ScriptChain:
             )
 
         node = self.node_registry[node_id]
+        node_config = node.config
         start_time = datetime.utcnow()
         attempt = 0
 
+        # Initialize node execution context
+        execution_context = node_context or {}
+        
+        # Resolve dependencies and apply input mappings if defined
+        if hasattr(node_config, 'input_mappings') and node_config.input_mappings:
+            for target_key, mapping in node_config.input_mappings.items():
+                source_id = mapping.source_id
+                # Get the source node's execution result from context
+                source_context = await self.context.get_context(source_id)
+                if source_context and source_context.get('output'):
+                    source_output = source_context['output']
+                    
+                    # Apply any transformation rules if defined
+                    if mapping.rules and hasattr(mapping.rules, 'transform') and mapping.rules.transform:
+                        # For now, simple key extraction from the output
+                        # This could be extended with more complex transformations
+                        if mapping.rules.transform in source_output:
+                            execution_context[target_key] = source_output[mapping.rules.transform]
+                    else:
+                        # If no specific transform is defined, use the entire output
+                        execution_context[target_key] = source_output
+                        
+                    logger.debug(f"Applied input mapping from {source_id} to {target_key} for node {node_id}")
+                elif mapping.rules and mapping.rules.required:
+                    # If the required dependency isn't available, log warning
+                    logger.warning(f"Required dependency {source_id} not found for node {node_id}")
+        
+        # For nodes that define dependencies but not explicit mappings,
+        # make dependency outputs available in the context under their node IDs
+        if hasattr(node_config, 'dependencies') and node_config.dependencies:
+            for dep_id in node_config.dependencies:
+                if dep_id not in execution_context:  # Don't override explicit mappings
+                    dep_context = await self.context.get_context(dep_id)
+                    if dep_context and dep_context.get('output'):
+                        # Make the dependency's output available under its node ID
+                        execution_context[dep_id] = dep_context['output']
+                        logger.debug(f"Added dependency {dep_id} output to context for node {node_id}")
+
+        # Now execute the node with the enhanced context
         while attempt < max_retries:
             try:
-                result = await node.execute(node_context)
+                result = await node.execute(execution_context)
                 if result.success:
                     if result.metadata and result.metadata.start_time is None:
                         result.metadata.start_time = start_time
                     if result.metadata and result.metadata.end_time is None:
                         result.metadata.end_time = datetime.utcnow()
+                    
+                    # Store the context used for this execution in the result
+                    result.context_used = execution_context
                     return result
 
                 error_reason = result.error or f"Node {node_id} returned success=False"
@@ -522,7 +573,8 @@ class ScriptChain:
                             end_time=datetime.utcnow(),
                             error_type=e.__class__.__name__,
                             error_traceback=error_traceback
-                        )
+                        ),
+                        context_used=execution_context
                     )
 
         return NodeExecutionResult(
@@ -534,7 +586,8 @@ class ScriptChain:
                 start_time=start_time,
                 end_time=datetime.utcnow(),
                 error_type="MaxRetriesExceeded"
-            )
+            ),
+            context_used=execution_context
         )
 
     def _find_components(self) -> List[Set[str]]:

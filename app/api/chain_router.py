@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Any, Tuple, Union
 import logging
 import yaml
 import json
+from datetime import datetime
 
 from app.chains.script_chain import ScriptChain
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata
@@ -97,6 +98,11 @@ class WorkflowDefinition(BaseModel):
                 raise ValueError(f"Edge target '{edge.target}' not found in nodes")
                 
         return edges
+
+class ChainExecutionRequest(BaseModel):
+    """Request model for chain execution with initial inputs."""
+    inputs: Dict[str, Any] = Field(default_factory=dict, description="Initial inputs for the chain")
+    node_inputs: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Specific inputs for individual nodes")
 
 @router.post(
     "/chains",
@@ -220,6 +226,90 @@ async def execute_chain(chain_id: str, background_tasks: BackgroundTasks):
         
     return {"message": f"Chain {chain_id} execution started in background."}
 
+@router.post(
+    "/chains/{chain_id}/execute-with-inputs",
+    summary="Execute the chain with initial inputs",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=Dict[str, str]
+)
+async def execute_chain_with_inputs(
+    chain_id: str, 
+    request: ChainExecutionRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Triggers the execution of the specified chain with initial inputs.
+    The inputs can be global for the chain or specific to individual nodes.
+    Returns immediately with a message indicating execution has started.
+    Check the results endpoint for completion status and output.
+    """
+    if chain_id not in chains:
+        logger.warning(f"Attempt to execute non-existent chain: {chain_id}")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chain not found")
+    
+    chain = chains[chain_id]
+    
+    # Pass the execution to a background function with inputs
+    async def run_chain_execution_with_inputs(chain_id: str, chain: ScriptChain, inputs: Dict[str, Any], node_inputs: Dict[str, Dict[str, Any]]):
+        """Helper function to run chain execution with inputs and store results."""
+        try:
+            logger.info(f"Starting execution of chain {chain_id} with inputs")
+            chain_status[chain_id] = "running"
+            
+            # Set initial context for nodes based on provided inputs
+            for node_id, node_input in node_inputs.items():
+                # Check if the node exists
+                if node_id in chain.node_registry:
+                    # Create an initial "result" for the node with the provided inputs
+                    # This will be accessible via the context manager during execution
+                    initial_result = NodeExecutionResult(
+                        success=True,
+                        output=node_input,
+                        metadata=NodeMetadata(
+                            node_id=node_id,
+                            node_type="input",
+                            start_time=datetime.utcnow(),
+                            end_time=datetime.utcnow()
+                        )
+                    )
+                    await chain.context.update_context(node_id, initial_result)
+                    logger.debug(f"Set initial context for node {node_id} in chain {chain_id}")
+                else:
+                    logger.warning(f"Node {node_id} not found in chain {chain_id} for setting inputs")
+            
+            # Execute the chain
+            result = await chain.execute()
+            chain_results[chain_id] = result
+            chain_status[chain_id] = "completed"
+            logger.info(f"Chain {chain_id} execution completed successfully")
+        except Exception as e:
+            logger.error(f"Chain {chain_id} execution failed in background: {e}", exc_info=True)
+            # Store an error result
+            chain_results[chain_id] = NodeExecutionResult(
+                success=False,
+                error=f"Chain execution failed: {str(e)}",
+                metadata=NodeMetadata(node_id=chain_id, node_type="chain", error_type=e.__class__.__name__)
+            )
+            chain_status[chain_id] = "failed"
+    
+    # Add execution to background tasks
+    background_tasks.add_task(
+        run_chain_execution_with_inputs, 
+        chain_id, 
+        chain, 
+        request.inputs, 
+        request.node_inputs
+    )
+    
+    # Clear previous results for this chain if any
+    if chain_id in chain_results:
+        del chain_results[chain_id]
+    
+    # Update status
+    chain_status[chain_id] = "pending"
+    logger.info(f"Chain {chain_id} execution with inputs queued in background")
+        
+    return {"message": f"Chain {chain_id} execution started in background with provided inputs."}
 
 @router.get(
     "/chains/{chain_id}",
