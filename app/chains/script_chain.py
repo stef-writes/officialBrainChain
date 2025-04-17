@@ -69,10 +69,10 @@ class ScriptChain:
         self.vector_store_config = vector_store_config
         self.vector_store = PineconeVectorStore(vector_store_config) if vector_store_config else None
         
-        # Custom context manager using graph structure
+        # Custom context manager using graph structure, max_tokens, and vector_store
         self.context = GraphContextManager(
-            max_tokens=max_context_tokens,
             graph=self.graph,
+            max_tokens=max_context_tokens,
             vector_store=self.vector_store
         )
         
@@ -470,17 +470,19 @@ class ScriptChain:
                 logger.error(f"Callback error in {callback.__class__.__name__}: {e}")
 
     async def execute_node(self, node_id: str, node_context: Optional[Dict[str, Any]] = None, max_retries: int = 3) -> NodeExecutionResult:
-        """Execute a single node with retry logic.
-        
+        """Execute a single node with retry logic, using managed context.
+
         Args:
             node_id: ID of the node to execute
-            node_context: The context dictionary for the node execution.
+            node_context: Initial context specific to this node run (e.g., from external triggers).
+                          Note: This is potentially overridden by dependency outputs.
             max_retries: Maximum number of retry attempts
-            
+
         Returns:
             NodeExecutionResult containing the execution result
         """
         if node_id not in self.node_registry:
+            logger.error(f"Node {node_id} not found in registry during execute_node call.")
             return NodeExecutionResult(
                 success=False,
                 error=f"Node {node_id} not found in registry",
@@ -496,73 +498,138 @@ class ScriptChain:
         start_time = datetime.utcnow()
         attempt = 0
 
-        # Initialize node execution context
-        execution_context = node_context or {}
-        
-        # Resolve dependencies and apply input mappings if defined
-        if hasattr(node_config, 'input_mappings') and node_config.input_mappings:
-            for target_key, mapping in node_config.input_mappings.items():
-                source_id = mapping.source_id
-                # Get the source node's execution result from context
-                source_context = await self.context.get_context(source_id)
-                if source_context and source_context.get('output'):
-                    source_output = source_context['output']
-                    
-                    # Apply any transformation rules if defined
-                    if mapping.rules and hasattr(mapping.rules, 'transform') and mapping.rules.transform:
-                        # For now, simple key extraction from the output
-                        # This could be extended with more complex transformations
-                        if mapping.rules.transform in source_output:
-                            execution_context[target_key] = source_output[mapping.rules.transform]
-                    else:
-                        # If no specific transform is defined, use the entire output
-                        execution_context[target_key] = source_output
-                        
-                    logger.debug(f"Applied input mapping from {source_id} to {target_key} for node {node_id}")
-                elif mapping.rules and mapping.rules.required:
-                    # If the required dependency isn't available, log warning
-                    logger.warning(f"Required dependency {source_id} not found for node {node_id}")
-        
-        # For nodes that define dependencies but not explicit mappings,
-        # make dependency outputs available in the context under their node IDs
-        if hasattr(node_config, 'dependencies') and node_config.dependencies:
-            for dep_id in node_config.dependencies:
-                if dep_id not in execution_context:  # Don't override explicit mappings
-                    dep_context = await self.context.get_context(dep_id)
-                    if dep_context and dep_context.get('output'):
-                        # Make the dependency's output available under its node ID
-                        execution_context[dep_id] = dep_context['output']
-                        logger.debug(f"Added dependency {dep_id} output to context for node {node_id}")
+        # --- Refactored Context Retrieval ---
+        execution_context = {} # Start with an empty context for this execution run
+        try:
+            # Determine all dependencies needed for context
+            # Includes explicit dependencies and sources for input mappings
+            dependencies_for_context = set(node_config.dependencies)
+            if hasattr(node_config, 'input_mappings') and node_config.input_mappings:
+                for mapping in node_config.input_mappings.values():
+                    dependencies_for_context.add(mapping.source_id)
 
-        # Now execute the node with the enhanced context
+            requested_dependency_list = list(dependencies_for_context)
+            logger.debug(f"Node {node_id} requesting managed context for dependencies: {requested_dependency_list}")
+
+            # Get the context managed by GraphContextManager (handles token limits, etc.)
+            managed_context = await self.context.get_managed_context(node_id, requested_dependency_list)
+
+            # Apply input mappings using the managed context
+            if hasattr(node_config, 'input_mappings') and node_config.input_mappings:
+                for target_key, mapping in node_config.input_mappings.items():
+                    source_id = mapping.source_id
+                    if source_id in managed_context:
+                        source_output = managed_context[source_id] # Get output from managed context
+
+                        # Apply transformation rules if defined
+                        if mapping.rules and hasattr(mapping.rules, 'transform') and mapping.rules.transform:
+                            if isinstance(source_output, dict) and mapping.rules.transform in source_output:
+                                execution_context[target_key] = source_output[mapping.rules.transform]
+                                logger.debug(f"Applied input mapping from {source_id} (key: {mapping.rules.transform}) to {target_key} for node {node_id}")
+                            else:
+                                # Transformation key not found in source output dictionary
+                                logger.warning(f"Input mapping transform key '{mapping.rules.transform}' not found in source output for {source_id} -> {node_id}.")
+                                if mapping.rules and mapping.rules.required:
+                                    raise ValueError(f"Required input '{target_key}' could not be resolved: Transform key '{mapping.rules.transform}' missing in source '{source_id}'.")
+                        elif isinstance(source_output, (dict, list, str, int, float, bool)): # Check if source_output is simple type or dict/list
+                             # If no specific transform is defined, use the entire output
+                             execution_context[target_key] = source_output
+                             logger.debug(f"Applied input mapping from {source_id} (full output) to {target_key} for node {node_id}")
+                        else:
+                            logger.warning(f"Input mapping source {source_id} output type ({type(source_output)}) cannot be directly mapped for node {node_id}. Skipping.")
+                            if mapping.rules and mapping.rules.required:
+                                raise ValueError(f"Required input '{target_key}' could not be resolved: Source '{source_id}' has unmappable type.")
+
+                    elif mapping.rules and mapping.rules.required:
+                        # Required dependency output wasn't included by get_managed_context (e.g., cache miss, failed execution, token limit)
+                        logger.error(f"Required dependency '{source_id}' output not found in managed context for node {node_id}")
+                        raise ValueError(f"Required input '{target_key}' could not be resolved: Missing required dependency '{source_id}' in context.")
+                    else:
+                        # Optional dependency not found in context, log debug message
+                        logger.debug(f"Optional dependency {source_id} not found in managed context for input mapping to {target_key} for node {node_id}")
+
+            # Add any remaining managed context items (e.g., direct deps not used in mappings)
+            # This makes outputs of all requested dependencies available under their node ID,
+            # unless explicitly mapped to a different key above.
+            for dep_id, dep_output in managed_context.items():
+                if dep_id not in execution_context: # Avoid overwriting explicitly mapped inputs
+                    execution_context[dep_id] = dep_output
+                    logger.debug(f"Added dependency '{dep_id}' output directly to context for node {node_id}")
+
+            # Merge initial context provided to the function call (if any)
+            # Dependency outputs take precedence over initial context if keys conflict
+            if node_context:
+                for key, value in node_context.items():
+                    if key not in execution_context:
+                        execution_context[key] = value
+
+
+        except Exception as e:
+             logger.error(f"Error preparing context for node {node_id}: {e}", exc_info=True)
+             return NodeExecutionResult(
+                 success=False,
+                 error=f"Context preparation failed: {str(e)}",
+                 metadata=NodeMetadata(
+                     node_id=node_id,
+                     node_type=getattr(node, 'type', 'unknown'),
+                     start_time=start_time,
+                     end_time=datetime.utcnow(),
+                     error_type="ContextPreparationError"
+                 )
+             )
+        # --- End Refactored Context Retrieval ---
+
+
+        # Now execute the node with the carefully constructed context
         while attempt < max_retries:
+            logger.debug(f"Executing node {node_id} (Attempt {attempt + 1}/{max_retries}) with context keys: {list(execution_context.keys())}")
             try:
-                result = await node.execute(execution_context)
+                result = await node.execute(execution_context) # Pass the prepared context
+
+                # Store the specific context used for this execution attempt in the result
+                # Useful for debugging exactly what the node received
+                result.context_used = execution_context
+
                 if result.success:
+                    # Update metadata timestamps if not already set by the node
                     if result.metadata and result.metadata.start_time is None:
                         result.metadata.start_time = start_time
                     if result.metadata and result.metadata.end_time is None:
                         result.metadata.end_time = datetime.utcnow()
-                    
-                    # Store the context used for this execution in the result
-                    result.context_used = execution_context
-                    return result
 
+                    # ---> IMPORTANT: Update the central context cache <---
+                    # This makes the result available for downstream nodes via get_managed_context
+                    await self.context.update_context(node_id, result)
+                    # ---
+
+                    logger.info(f"Node {node_id} executed successfully (Attempt {attempt + 1})")
+                    return result # Return successful result
+
+                # --- Handle failure from node.execute ---
                 error_reason = result.error or f"Node {node_id} returned success=False"
                 logger.warning(f"Node {node_id} execution attempt {attempt + 1}/{max_retries} returned success=False: {error_reason}")
                 attempt += 1
                 if attempt < max_retries:
-                    await asyncio.sleep(1 * attempt)
+                    await asyncio.sleep(1 * attempt) # Exponential backoff
                 else:
-                    return result
+                    # Final attempt failed
+                    logger.error(f"Node {node_id} failed after {max_retries} attempts. Last error: {error_reason}")
+                    if result.metadata and result.metadata.start_time is None: result.metadata.start_time = start_time
+                    if result.metadata and result.metadata.end_time is None: result.metadata.end_time = datetime.utcnow()
+                    result.metadata = result.metadata or NodeMetadata(node_id=node_id, node_type=node.config.type)
+                    result.metadata.error_type = result.metadata.error_type or "NodeExecutionFailed"
+                    return result # Return the failure result from the node
 
             except Exception as e:
-                logger.error(f"Node {node_id} execution failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                # --- Handle exception during node.execute call ---
+                logger.error(f"Node {node_id} execution failed with exception (Attempt {attempt + 1}/{max_retries}): {str(e)}", exc_info=True)
+                error_traceback = traceback.format_exc()
                 attempt += 1
                 if attempt < max_retries:
-                    await asyncio.sleep(1 * attempt)
+                    await asyncio.sleep(1 * attempt) # Exponential backoff
                 else:
-                    error_traceback = traceback.format_exc()
+                    # Final attempt failed with exception
+                    logger.error(f"Node {node_id} failed permanently after {max_retries} attempts due to exception.")
                     return NodeExecutionResult(
                         success=False,
                         error=str(e),
@@ -574,12 +641,15 @@ class ScriptChain:
                             error_type=e.__class__.__name__,
                             error_traceback=error_traceback
                         ),
-                        context_used=execution_context
+                        context_used=execution_context # Include context even on exception
                     )
 
+        # This part should theoretically not be reached due to return statements in the loop,
+        # but added as a safeguard.
+        logger.error(f"Node {node_id} failed after {max_retries} attempts (reached end of retry loop unexpectedly).")
         return NodeExecutionResult(
             success=False,
-            error=f"Node {node_id} failed after {max_retries} attempts (reached end of retry loop)",
+            error=f"Node {node_id} failed after {max_retries} attempts (unexpected loop exit)",
             metadata=NodeMetadata(
                 node_id=node_id,
                 node_type=getattr(node, 'type', 'unknown'),
