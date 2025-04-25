@@ -1,0 +1,9 @@
+{
+  "default": {
+    "model": "gpt-4",
+    "temperature": 0.7,
+    "max_tokens": 1000,
+    "max_context_tokens": 4000,
+    "api_key": "REMOVED_API_KEY_PLACEHOLDERrfTQ2_Nhn2sz5CJgypbGHerCchrUwyAGhlTIa31Z-Jo0Qye6_PhU2U6GTyZN_7idXTqXD70A"
+  }
+}
