@@ -4,7 +4,7 @@ Enhanced workflow orchestration system with level-based parallel execution and r
 
 from datetime import datetime
 import networkx as nx
-from typing import Dict, List, Optional, Any, Union, Set, Tuple
+from typing import Dict, List, Optional, Any, Union, Set, Tuple, Callable
 from pydantic import BaseModel, ValidationError
 from app.models.node_models import NodeConfig, NodeExecutionResult, NodeMetadata, UsageMetadata
 from app.models.config import LLMConfig, MessageTemplate
@@ -17,11 +17,29 @@ from uuid import uuid4
 import asyncio
 import os
 import traceback
+import json
 from collections import deque
 from app.vector.pinecone_store import PineconeVectorStore
 from app.models.vector_store import VectorStoreConfig
 
 logger = logging.getLogger(__name__)
+
+# Custom exceptions for better error handling
+class ScriptChainError(Exception):
+    """Base exception class for ScriptChain errors"""
+    pass
+
+class InputMappingError(ScriptChainError):
+    """Exception raised when input mapping fails"""
+    pass
+
+class NodeExecutionError(ScriptChainError):
+    """Exception raised when node execution fails"""
+    pass
+
+class ContextError(ScriptChainError):
+    """Exception raised when context operations fail"""
+    pass
 
 class ExecutionLevel(BaseModel):
     """Represents a group of nodes that can be executed in parallel"""
@@ -32,13 +50,26 @@ class ExecutionLevel(BaseModel):
 class ScriptChain:
     """Advanced workflow orchestrator with level-based parallel execution"""
     
+    # Default transform functions
+    @staticmethod
+    def _stringify_transform(value: Any) -> str:
+        """Convert value to string"""
+        return str(value)
+    
+    @staticmethod
+    def _jsonify_transform(value: Any) -> str:
+        """Convert value to JSON string"""
+        return json.dumps(value)
+    
     def __init__(
         self,
         max_context_tokens: int = 4000,
         callbacks: Optional[List[ScriptChainCallback]] = None,
         concurrency_level: int = 10,
         vector_store_config: Optional[Dict] = None,
-        llm_config: Optional[Dict[str, Any]] = None
+        llm_config: Optional[Dict[str, Any]] = None,
+        min_concurrency: int = 2,
+        max_concurrency: int = 20
     ):
         """Initialize the script chain with enhanced configuration"""
         self.chain_id = f"chain_{uuid4().hex[:8]}"
@@ -49,6 +80,18 @@ class ScriptChain:
         self.node_registry: Dict[str, BaseNode] = {}
         self.callbacks = callbacks or []
         self.max_context_tokens = max_context_tokens
+        
+        # Concurrency controls
+        self.min_concurrency = min_concurrency
+        self.max_concurrency = max_concurrency
+        self.base_concurrency_level = concurrency_level
+        self.concurrency_level = concurrency_level  # Will be dynamically adjusted
+        
+        # Transform registry for pluggable transforms
+        self.transform_registry: Dict[str, Callable] = {
+            'stringify': self._stringify_transform,
+            'jsonify': self._jsonify_transform
+        }
         
         # Convert llm_config dict to LLMConfig instance
         default_llm_config = {
@@ -80,9 +123,6 @@ class ScriptChain:
             vector_store_config=vector_store_config
         )
         
-        # Execution configuration
-        self.concurrency_level = concurrency_level
-        
         # Observability
         self.metrics = {
             'start_time': None,
@@ -91,6 +131,29 @@ class ScriptChain:
         }
         
         logger.info(f"Initialized new ScriptChain: {self.chain_id}")
+
+    def register_transform(self, name: str, transform_func: Callable) -> None:
+        """Register a custom transform function
+        
+        Args:
+            name: Name of the transform
+            transform_func: Function that takes a value and returns transformed value
+        """
+        if name in self.transform_registry:
+            logger.warning(f"Overriding existing transform: {name}")
+        self.transform_registry[name] = transform_func
+        logger.debug(f"Registered transform: {name}")
+    
+    def get_transform(self, name: str) -> Optional[Callable]:
+        """Get a transform function by name
+        
+        Args:
+            name: Name of the transform
+            
+        Returns:
+            Transform function or None if not found
+        """
+        return self.transform_registry.get(name)
 
     def add_callback(self, callback: ScriptChainCallback) -> None:
         """Add a callback handler to the chain.
@@ -136,6 +199,30 @@ class ScriptChain:
         self.graph.add_node(node_config.id)
         for dep in node_config.dependencies:
             self.graph.add_edge(dep, node_config.id)
+        
+        # Recalculate optimal concurrency when nodes change
+        self._adjust_concurrency_level()
+
+    def _adjust_concurrency_level(self) -> None:
+        """Dynamically adjust concurrency level based on node count and complexity"""
+        node_count = len(self.node_registry)
+        if node_count == 0:
+            self.concurrency_level = self.base_concurrency_level
+            return
+            
+        # Simple heuristic: roughly sqrt(node_count) but constrained by min/max
+        optimal_concurrency = min(
+            self.max_concurrency,
+            max(
+                self.min_concurrency,
+                min(int(node_count / 2) + 1, self.base_concurrency_level)
+            )
+        )
+        
+        # Only log if changing
+        if optimal_concurrency != self.concurrency_level:
+            self.concurrency_level = optimal_concurrency
+            logger.info(f"Adjusted concurrency level to {self.concurrency_level} based on {node_count} nodes")
 
     def add_edge(self, from_node_id: str, to_node_id: str) -> None:
         """Add a dependency edge between nodes with validation.
@@ -328,7 +415,7 @@ class ScriptChain:
                         result = await node.execute()
                     
                     # Update context and metrics
-                    await self.context.update(node_id, result)
+                    await self.context.update_context(node_id, result)
                     self._update_metrics(node_id, result)
                     
                     await self._trigger_callbacks('node_end', NodeExecutionResult(
@@ -446,10 +533,92 @@ class ScriptChain:
         start_time = datetime.utcnow()
         
         try:
-            result = await node.execute()
-            return result
+            # Get requested dependencies for this node
+            requested_dependencies = list(self.dependencies.get(node_id, set()))
+            
+            # Get managed context with requested dependencies for safe truncation
+            try:
+                context = await self.context.get_managed_context(node_id, requested_dependencies)
+            except Exception as e:
+                logger.error(f"Context error for node {node_id}: {str(e)}")
+                raise ContextError(f"Failed to get context for node {node_id}: {str(e)}")
+            
+            # Apply input mappings from NodeConfig with proper handling of rules
+            inputs = context
+            if hasattr(node.config, 'input_mappings') and node.config.input_mappings:
+                try:
+                    inputs = {}
+                    # First collect all mapped inputs
+                    for target, mapping in node.config.input_mappings.items():
+                        source = mapping.source if hasattr(mapping, 'source') else mapping
+                        
+                        # Skip if source not in context and not required
+                        if source not in context:
+                            if hasattr(mapping, 'required') and mapping.required:
+                                raise InputMappingError(f"Required input '{source}' not found in context for node {node_id}")
+                            continue
+                        
+                        # Apply transform if specified
+                        value = context[source]
+                        if hasattr(mapping, 'transform') and mapping.transform:
+                            transform_name = mapping.transform
+                            transform_func = self.get_transform(transform_name)
+                            
+                            if transform_func:
+                                try:
+                                    value = transform_func(value)
+                                except Exception as e:
+                                    raise InputMappingError(f"Transform '{transform_name}' failed for '{source}': {str(e)}")
+                            else:
+                                raise InputMappingError(f"Unknown transform '{transform_name}' for '{source}'")
+                        
+                        inputs[target] = value
+                except InputMappingError as e:
+                    # Let InputMappingError propagate with its original message
+                    raise
+                except Exception as e:
+                    # Wrap other exceptions as InputMappingError
+                    raise InputMappingError(f"Error mapping inputs for node {node_id}: {str(e)}")
+            
+            # Trigger node_start callback with consistent format
+            await self._trigger_callbacks('node_start', NodeExecutionResult(
+                success=True,
+                output={
+                    'node_id': node_id,
+                    'inputs': inputs,
+                    'level': node.config.level if hasattr(node.config, 'level') else 0
+                },
+                metadata=NodeMetadata(
+                    node_id=node_id,
+                    node_type=node.type,
+                    start_time=start_time
+                )
+            ))
+            
+            # Execute node with inputs
+            try:
+                result = await node.execute(inputs)
+                return result
+            except Exception as e:
+                raise NodeExecutionError(f"Node {node_id} execution failed: {str(e)}")
+                
+        except (ContextError, InputMappingError, NodeExecutionError) as e:
+            # Handle known error types with specific logging
+            logger.error(f"{e.__class__.__name__}: {str(e)}")
+            return NodeExecutionResult(
+                success=False,
+                error=str(e),
+                metadata=NodeMetadata(
+                    node_id=node_id,
+                    node_type=node.type,
+                    start_time=start_time,
+                    end_time=datetime.utcnow(),
+                    error_type=e.__class__.__name__
+                )
+            )
         except Exception as e:
-            logger.error(f"Node {node_id} execution failed: {str(e)}")
+            # Catch-all for unexpected errors
+            logger.error(f"Unexpected error executing node {node_id}: {str(e)}")
             return NodeExecutionResult(
                 success=False,
                 error=str(e),
