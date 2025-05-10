@@ -27,7 +27,7 @@ from app.utils.context import GraphContextManager
 from app.nodes.base import BaseNode
 from app.utils.logging import logger
 from app.utils.tracking import track_usage
-from app.utils.callbacks import NodeCallback
+from app.utils.callbacks import ScriptChainCallback
 
 from langchain_community.chat_models import ChatOpenAI
 from langchain_core.messages import (
@@ -101,7 +101,7 @@ class TextGenerationNode(BaseNode):
         config: NodeConfig,
         context_manager: GraphContextManager,
         llm_config: LLMConfig,
-        callbacks: Optional[List[NodeCallback]] = None
+        callbacks: Optional[List[ScriptChainCallback]] = None
     ):
         """Initialize text generation node.
         
@@ -211,7 +211,7 @@ class TextGenerationNode(BaseNode):
             
             # Call callbacks
             for callback in self.callbacks:
-                await callback.on_node_complete(self.config.id, result)
+                await callback.on_node_end(self.config.id, result)
             
             return result
             
