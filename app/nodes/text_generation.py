@@ -179,9 +179,21 @@ class TextGenerationNode(BaseNode):
                 HumanMessage(content=prompt)
             ]
             
+            # Temporary logging
+            logger.info(f"TextGenerationNode ({self.config.id}): About to call agenerate.")
+            logger.info(f"TextGenerationNode ({self.config.id}): LLM object: {self.llm}")
+            if hasattr(self.llm, 'openai_api_key'):
+                logger.info(f"TextGenerationNode ({self.config.id}): LLM API Key: {self.llm.openai_api_key}")
+            else:
+                logger.info(f"TextGenerationNode ({self.config.id}): LLM API Key attribute not found.")
+            logger.info(f"TextGenerationNode ({self.config.id}): Messages: {messages}")
+
             # Execute LLM
             response = await self.llm.agenerate([messages])
             
+            # Temporary logging
+            logger.info(f"TextGenerationNode ({self.config.id}): agenerate response: {response}")
+
             # Process response
             output = response.generations[0][0].text
             
@@ -191,7 +203,7 @@ class TextGenerationNode(BaseNode):
             # Create result
             result = NodeExecutionResult(
                 success=True,
-                output=output,
+                output={"text": output},
                 metadata=NodeMetadata(
                     node_id=self.config.id,
                     node_type=self.type,
@@ -200,7 +212,9 @@ class TextGenerationNode(BaseNode):
                 usage=UsageMetadata(
                     prompt_tokens=response.llm_output.get('token_usage', {}).get('prompt_tokens', 0),
                     completion_tokens=response.llm_output.get('token_usage', {}).get('completion_tokens', 0),
-                    total_tokens=response.llm_output.get('token_usage', {}).get('total_tokens', 0)
+                    total_tokens=response.llm_output.get('token_usage', {}).get('total_tokens', 0),
+                    model=self.llm_config.model,
+                    node_id=self.config.id
                 ),
                 execution_time=execution_time,
                 context_used=inputs

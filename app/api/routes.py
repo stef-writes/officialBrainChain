@@ -38,14 +38,19 @@ async def create_text_generation_node(request: NodeRequest):
 async def execute_chain(request: ChainRequest):
     """Execute a chain of nodes"""
     try:
-        context_manager = GraphContextManager()
-        chain = ScriptChain(context_manager=context_manager)
+        # The GraphContextManager instance created here is not directly used by ScriptChain anymore.
+        # ScriptChain now internally manages its own context manager.
+        # However, if nodes were to be created *outside* the chain and then added, they might need one.
+        # For this route, ScriptChain.add_node(NodeConfig) is used, which handles node creation internally.
+        
+        chain = ScriptChain() # Initialize without the unexpected context_manager argument
         
         # Add nodes to chain
         for node_config in request.nodes:
             if node_config.metadata.node_type == "ai":
-                node = TextGenerationNode(node_config, context_manager)
-                chain.add_node(node)
+                # ScriptChain.add_node now accepts NodeConfig and creates the node internally
+                # using its own context manager and LLM config.
+                chain.add_node(node_config)
             else:
                 raise HTTPException(
                     status_code=400,

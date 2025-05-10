@@ -376,6 +376,7 @@ class ScriptChain:
 
     async def _process_level(self, level: ExecutionLevel) -> NodeExecutionResult:
         """Process all nodes in a level with controlled concurrency"""
+        level_start_time = datetime.utcnow() # Define start time for the level
         semaphore = asyncio.Semaphore(self.concurrency_level)
         
         async def process_node(node_id: str) -> Tuple[str, NodeExecutionResult]:
@@ -410,19 +411,19 @@ class ScriptChain:
                 try:
                     # Simple execution with error handling
                     if hasattr(self, 'execute_node'):  # For test mocking
-                        result = await self.execute_node(node_id)
+                        node_exec_result_obj = await self.execute_node(node_id)
                     else:
-                        result = await node.execute()
+                        node_exec_result_obj = await node.execute()
                     
                     # Update context and metrics
-                    await self.context.update_context(node_id, result)
-                    self._update_metrics(node_id, result)
+                    self.context.update_context(node_id, node_exec_result_obj.output)
+                    self._update_metrics(node_id, node_exec_result_obj)
                     
                     await self._trigger_callbacks('node_end', NodeExecutionResult(
-                        success=True,
+                        success=node_exec_result_obj.success,
                         output={
                             'node_id': node_id,
-                            'result': result.model_dump(),
+                            'result': node_exec_result_obj.model_dump(),
                             'level': level.level
                         },
                         metadata=NodeMetadata(
@@ -433,7 +434,7 @@ class ScriptChain:
                         )
                     ))
                     
-                    return node_id, result
+                    return node_id, node_exec_result_obj
                     
                 except Exception as e:
                     error_result = NodeExecutionResult(
@@ -454,12 +455,12 @@ class ScriptChain:
         tasks = [process_node(node_id) for node_id in level.node_ids]
         results = await asyncio.gather(*tasks)
         return NodeExecutionResult(
-            success=all(r.success for nid, r in results.items()),
+            success=all(r.success for _, r in results),
             output=dict(results),
             metadata=NodeMetadata(
-                node_id=self.chain_id,
-                node_type="chain",
-                start_time=start_time,
+                node_id=self.chain_id, # Using self.chain_id for the overall chain
+                node_type="level_summary", # Clarifying node_type for level result
+                start_time=level_start_time, # Use the defined level_start_time
                 end_time=datetime.utcnow()
             )
         )
@@ -533,59 +534,54 @@ class ScriptChain:
         start_time = datetime.utcnow()
         
         try:
-            # Get requested dependencies for this node
-            requested_dependencies = list(self.dependencies.get(node_id, set()))
-            
-            # Get managed context with requested dependencies for safe truncation
-            try:
-                context = await self.context.get_managed_context(node_id, requested_dependencies)
-            except Exception as e:
-                logger.error(f"Context error for node {node_id}: {str(e)}")
-                raise ContextError(f"Failed to get context for node {node_id}: {str(e)}")
-            
-            # Apply input mappings from NodeConfig with proper handling of rules
-            inputs = context
+            # Prepare inputs for the current node based on outputs of its dependencies
+            # and the input_mappings specified in its NodeConfig.
+            mapped_inputs = {}
             if hasattr(node.config, 'input_mappings') and node.config.input_mappings:
-                try:
-                    inputs = {}
-                    # First collect all mapped inputs
-                    for target, mapping in node.config.input_mappings.items():
-                        source = mapping.source if hasattr(mapping, 'source') else mapping
+                for target_key, mapping_rule in node.config.input_mappings.items():
+                    # mapping_rule is an InputMapping object
+                    # mapping_rule.source_id is the ID of the node that produced the data.
+                    # mapping_rule.rules is a ContextRule object for transforms, requirements etc.
+                    producer_node_id = mapping_rule.source_id
+                    context_rule_for_input = mapping_rule.rules
+
+                    # Get the output of the producer_node_id from the context cache.
+                    # self.context.get_context(producer_node_id) should return the actual output data.
+                    producer_output = self.context.get_context(producer_node_id)
+
+                    if producer_output is None:
+                        if context_rule_for_input.required:
+                            raise InputMappingError(f"Required input from source_id '{producer_node_id}' (for target '{target_key}') not found in context for node '{node_id}'")
+                        continue # Skip if not required and not found
+                    
+                    value_to_transform = producer_output
+
+                    # Apply transform if specified in the ContextRule
+                    if context_rule_for_input.transform:
+                        transform_name = context_rule_for_input.transform
+                        transform_func = self.get_transform(transform_name)
                         
-                        # Skip if source not in context and not required
-                        if source not in context:
-                            if hasattr(mapping, 'required') and mapping.required:
-                                raise InputMappingError(f"Required input '{source}' not found in context for node {node_id}")
-                            continue
-                        
-                        # Apply transform if specified
-                        value = context[source]
-                        if hasattr(mapping, 'transform') and mapping.transform:
-                            transform_name = mapping.transform
-                            transform_func = self.get_transform(transform_name)
-                            
-                            if transform_func:
-                                try:
-                                    value = transform_func(value)
-                                except Exception as e:
-                                    raise InputMappingError(f"Transform '{transform_name}' failed for '{source}': {str(e)}")
-                            else:
-                                raise InputMappingError(f"Unknown transform '{transform_name}' for '{source}'")
-                        
-                        inputs[target] = value
-                except InputMappingError as e:
-                    # Let InputMappingError propagate with its original message
-                    raise
-                except Exception as e:
-                    # Wrap other exceptions as InputMappingError
-                    raise InputMappingError(f"Error mapping inputs for node {node_id}: {str(e)}")
-            
+                        if transform_func:
+                            try:
+                                value_to_transform = transform_func(value_to_transform)
+                            except Exception as e:
+                                raise InputMappingError(f"Transform '{transform_name}' failed for source_id '{producer_node_id}' (target '{target_key}'): {str(e)}")
+                        else:
+                            raise InputMappingError(f"Unknown transform '{transform_name}' for source_id '{producer_node_id}' (target '{target_key}')")
+                    
+                    mapped_inputs[target_key] = value_to_transform
+            else:
+                # If no input_mappings are defined, the node receives no explicit inputs from dependencies.
+                # It might rely on a general context or have a default behavior.
+                # For now, mapped_inputs remains empty. This could be a point of future refinement.
+                pass 
+
             # Trigger node_start callback with consistent format
             await self._trigger_callbacks('node_start', NodeExecutionResult(
                 success=True,
                 output={
                     'node_id': node_id,
-                    'inputs': inputs,
+                    'inputs': mapped_inputs,
                     'level': node.config.level if hasattr(node.config, 'level') else 0
                 },
                 metadata=NodeMetadata(
@@ -597,14 +593,15 @@ class ScriptChain:
             
             # Execute node with inputs
             try:
-                result = await node.execute(inputs)
+                result = await node.execute(mapped_inputs)
                 return result
             except Exception as e:
-                raise NodeExecutionError(f"Node {node_id} execution failed: {str(e)}")
+                # Catching exception from node.execute() itself
+                raise NodeExecutionError(f"Node '{node_id}' execution failed during its execute method: {str(e)}")
                 
-        except (ContextError, InputMappingError, NodeExecutionError) as e:
-            # Handle known error types with specific logging
-            logger.error(f"{e.__class__.__name__}: {str(e)}")
+        except (InputMappingError, NodeExecutionError) as e:
+            # Handle known error types from input mapping or node execution
+            logger.error(f"{e.__class__.__name__} for node '{node_id}': {str(e)}")
             return NodeExecutionResult(
                 success=False,
                 error=str(e),
@@ -617,8 +614,8 @@ class ScriptChain:
                 )
             )
         except Exception as e:
-            # Catch-all for unexpected errors
-            logger.error(f"Unexpected error executing node {node_id}: {str(e)}")
+            # Catch-all for unexpected errors during the setup/input mapping in execute_node
+            logger.error(f"Unexpected error preparing or executing node '{node_id}': {str(e)}")
             return NodeExecutionResult(
                 success=False,
                 error=str(e),

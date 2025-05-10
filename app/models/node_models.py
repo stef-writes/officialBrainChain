@@ -114,7 +114,7 @@ class NodeExecutionRecord(BaseModel):
 
 class NodeIO(BaseModel):
     """Input/Output schema for a node."""
-    schema: Dict[str, Any] = Field(default_factory=dict)
+    data_schema: Dict[str, Any] = Field(default_factory=dict)
     required: List[str] = Field(default_factory=list)
 
 class UsageMetadata(BaseModel):
