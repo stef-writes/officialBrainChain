@@ -179,21 +179,9 @@ class TextGenerationNode(BaseNode):
                 HumanMessage(content=prompt)
             ]
             
-            # Temporary logging
-            logger.info(f"TextGenerationNode ({self.config.id}): About to call agenerate.")
-            logger.info(f"TextGenerationNode ({self.config.id}): LLM object: {self.llm}")
-            if hasattr(self.llm, 'openai_api_key'):
-                logger.info(f"TextGenerationNode ({self.config.id}): LLM API Key: {self.llm.openai_api_key}")
-            else:
-                logger.info(f"TextGenerationNode ({self.config.id}): LLM API Key attribute not found.")
-            logger.info(f"TextGenerationNode ({self.config.id}): Messages: {messages}")
-
             # Execute LLM
             response = await self.llm.agenerate([messages])
             
-            # Temporary logging
-            logger.info(f"TextGenerationNode ({self.config.id}): agenerate response: {response}")
-
             # Process response
             output = response.generations[0][0].text
             
